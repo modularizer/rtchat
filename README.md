@@ -5,6 +5,7 @@ RTChat is a serverless chat system built using WebRTC and MQTT.
 * Public MQTT brokers and stun servers are used only for the initial signaling process to exchange information between the clients.
   * because the mqtt broker and stun servers are publicly accessible, there is no backend for this project, only staticly served files
   * the public servers are only used very briefly to exchange small amounts of info when new clients connect
+  * it takes **~3kB** of data transfer over mqtt to establish a connection between two clients
 * Once the clients have exchanged the necessary information, they can communicate directly and securely with each other using WebRTC.
 
 ## Try It
@@ -51,6 +52,16 @@ client.on("answer", (answer, sender) => {
 // peer.ask("what is the answer to life, the universe, and everything?").then(console.log);
 </script>
 ```
+
+## Security
+* the webRTC connection is end-to-end encrypted, BUT right now I have not implemented in security in the signaling and connection process
+* specifically, by default this chat will broadcast information related to your IP address (which every site you ever connect to on the internet already knows) to anyone else who has subscribed to the same mqtt broker and topic
+* basically, the signalling process as implemented right now is not secure, but also is not super sensitive information. it certainly could be made more secure, but there may not be much reason to do so
+* just make sure the person you are talking to ACTUALLY is the person you think you are talking to
+
+
+
+
 
 <details>
 <script src="https://modularizer.github.io/rtchat/rtchat.js?add"></script>

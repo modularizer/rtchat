@@ -3,6 +3,14 @@ let script = document.createElement('script');
 script.src = "https://unpkg.com/mqtt/dist/mqtt.min.js";
 document.head.appendChild(script);
 
+let lz = true;
+if (lz){
+    let lzStringScript = document.createElement('script');
+    lzStringScript.src = "https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.4.4/lz-string.min.js";
+    document.head.appendChild(lzStringScript);
+}
+
+
 // _____________________________________________ tab ID _______________________________________________________________
 // find the id of all the tabs open
 let tabs = localStorage.getItem('tabs');
@@ -52,7 +60,8 @@ let name = n || ("anon" + Math.floor(Math.random() * 1000));
 let defaultConfig = {
     broker: 'wss://public:public@public.cloud.shiftr.io',
     stunServer: "stun:stun4.l.google.com:19302",
-    topic: location.hostname + location.pathname.replace(/index\.html$/, "").replace(/[^a-zA-Z0-9]/g, "") + location.hash.replace("#", "").replace(/[^a-zA-Z0-9]/g, ""),
+    baseTopic: "mrtchat",
+    topic: (["localhost", "127.0.0.1", "modularizer.github.io"].includes(location.hostname)?"":location.hostname) + location.pathname.replace("rtchat/","").replace("index.html", "").replace(".html", "").replace(/[^a-zA-Z0-9]/g, "") + location.hash.replace("#", "").replace(/[^a-zA-Z0-9]/g, ""),
     name: name,
 }
 
@@ -70,12 +79,13 @@ class BaseMQTTRTCClient {
     this.name = name + "_" + tabID;
     this.userInfo = userInfo || {};
 
-    let {topic, broker, stunServer} = config || {};
+    let {baseTopic, topic, broker, stunServer} = config || {};
 
 
     this.mqttBroker = broker || defaultConfig.broker;
     this.stunServer = stunServer || defaultConfig.stunServer;
-    this.topic = topic || defaultConfig.topic;
+    this.baseTopic = baseTopic || defaultConfig.baseTopic;
+    this.topic = this.baseTopic + (topic || defaultConfig.topic);
 
     // bind methods to this
     // MQTT methods
@@ -126,14 +136,14 @@ class BaseMQTTRTCClient {
     }
 
     // connect to the MQTT broker
-    this.client = mqtt.connect(this.mqttBroker, {clientId: 'javascript'});
+    this.client = mqtt.connect(this.mqttBroker, {clientId: this.baseTopic + this.name});
     this.client.on('connect', this._onMQTTConnect.bind(this));
     this.client.on('message', this._onMQTTMessage.bind(this));
     window.addEventListener("beforeunload", this.beforeunload.bind(this));
   }
   _onMQTTConnect(){
     this.client.subscribe(this.topic);
-    this.postPubliclyToMQTTServer("connectedToMQTT", this.userInfo);
+    this.postPubliclyToMQTTServer("c", this.userInfo);
     this.onConnectedToMQTT();
   }
     onConnectedToMQTT(){
@@ -141,7 +151,19 @@ class BaseMQTTRTCClient {
     }
   _onMQTTMessage(t, payloadString){
         if (t === this.topic){
-            let payload = JSON.parse(payloadString);
+            let payload;
+            try{
+                let d = LZString.decompressFromUint8Array(payloadString);
+                payload = JSON.parse(d);
+            }catch(e){
+                payload = JSON.parse(payloadString)
+            }
+            payload = {
+                sender: payload.s,
+                timestamp: payload.n,
+                subtopic: payload.t,
+                data: payload.d
+            }
             if (payload.sender === this.name){
                 return;
             }
@@ -162,18 +184,24 @@ class BaseMQTTRTCClient {
   }
   postPubliclyToMQTTServer(subtopic, data){
     let payload = {
-        sender: this.name,
-        timestamp: Date.now(),
-        subtopic: subtopic,
-        data: data || message
+        s: this.name,
+        n: Date.now(),
+        t: subtopic,
+        d: data || message
     }
     let payloadString = JSON.stringify(payload);
+    let originalLength = payloadString.length;
+    if (window.LZString){
+        let compressed = LZString.compressToUint8Array(payloadString);
+        payloadString = compressed;
+    }
+    console.log("Sending message to " + this.topic + " on " + subtopic, data);
     this.client.publish(this.topic, payloadString);
   }
 
   //____________________________________________________________________________________________________________________
   mqttHandlers = {
-    connectedToMQTT: payload => {
+    c: payload => {//connection
         console.log("Received notice that someone else connected:" + payload.sender, payload, payload.data);
         this.knownUsers[payload.sender] = payload.data;
         this.shouldConnectToUser(payload.sender, payload.data).then(r => {
@@ -182,36 +210,36 @@ class BaseMQTTRTCClient {
             }
         })
     },
-    nameChange: payload => {
+    nc: payload => {//name
         this.recordNameChange(data.oldName, data.newName);
     },
-    beforeunload: payload => {
+    bu: payload => {
         this.disconnectFromUser(payload.sender);
         delete this.knownUsers[payload.sender];
     },
-    RTCoffer: payload => {
+    ro: payload => {//rtc offer
         console.log("received RTCoffer", payload);
-        let {offer, target} = payload.data;
-        if (target != this.name){return};
+        let {o, t} = payload.data;
+        if (t != this.name){return};
         if (this.rtcConnections[payload.sender]){
             console.warn("Already have a connection to " + payload.sender + ". Closing and reopening.")
             this.rtcConnections[payload.sender].close();
         }
         this.rtcConnections[payload.sender] = new RTCConnection(this, payload.sender);
-        this.rtcConnections[payload.sender].respondToOffer(offer);
+        this.rtcConnections[payload.sender].respondToOffer(o);
     },
-    RTCanswer: payload => {
+    ra: payload => {//rtc answer
         console.log("received RTCanswer", payload);
-        let {answer, target} = payload.data;
-        if (target != this.name){return};
+        let {a, t} = payload.data;
+        if (t != this.name){return};
         let rtcConnection = this.rtcConnections[payload.sender]; // Using the correct connection
         if (!rtcConnection){
             console.error("No connection found for " + payload.sender);
             return
         }
-        rtcConnection.receiveAnswer(answer);
+        rtcConnection.receiveAnswer(a);
     },
-    RTCiceCandidate: payload => {
+    ri: payload => {//rtc ice candidate
         let rtcConnection = this.rtcConnections[payload.sender]; // Using the correct connection
         if (!rtcConnection){
             console.error("No connection found for " + payload.sender);
@@ -389,7 +417,7 @@ class RTCConnection {
           .then(() => {
             // Send offer via MQTT
             console.log("Sending offer to " + this.target);
-            this.mqttClient.postPubliclyToMQTTServer("RTCoffer", {"offer": this.peerConnection.localDescription, "target": this.target});
+            this.mqttClient.postPubliclyToMQTTServer("ro", {"o": this.peerConnection.localDescription, "t": this.target});
           });
     }
     respondToOffer(offer){
@@ -398,9 +426,9 @@ class RTCConnection {
               .then(answer => this.peerConnection.setLocalDescription(answer))
               .then((answer) => {
                 // Send answer via MQTT
-                this.mqttClient.postPubliclyToMQTTServer("RTCanswer", {
-                    "answer": this.peerConnection.localDescription,
-                    "target": this.target,
+                this.mqttClient.postPubliclyToMQTTServer("ra", {
+                    "a": this.peerConnection.localDescription,
+                    "t": this.target,
                 });
               });
     }
@@ -411,12 +439,12 @@ class RTCConnection {
         }
         this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
         this.mqttClient.onConnectedToUser(this.target);
-        this.loadPromise.then((() => this.send("connectedViaRTC", JSON.stringify("connectedViaRTC"))).bind(this));
+        this.loadPromise.then((() => this.send("connectedViaRTC", null)).bind(this));
     }
     send(channel, serializedData){
         let dataChannel = this.dataChannels[channel];
         if (!dataChannel){
-            if (this.handlers[channel]){
+            if (this.mqttClient.rtcHandlers[channel]){
                 console.warn("handler found for ", channel, "but no data channel");
             }
             throw new Error("No data channel for " + channel);
@@ -437,7 +465,7 @@ class RTCConnection {
     onicecandidate(event){
         if (event.candidate) {
             // Send ICE candidate via MQTT
-            this.mqttClient.postPubliclyToMQTTServer("RTCiceCandidate", event.candidate);
+            this.mqttClient.postPubliclyToMQTTServer("ri", event.candidate);
         }
     }
     ondatachannel(event){
