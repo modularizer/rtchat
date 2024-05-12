@@ -62,8 +62,3 @@ client.on("answer", (answer, sender) => {
 
 
 
-
-<details>
-<script src="https://modularizer.github.io/rtchat/rtchat.js?add"></script>
-</details>
-
