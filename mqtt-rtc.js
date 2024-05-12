@@ -1,3 +1,7 @@
+// automatically load the MQTT library
+let script = document.createElement('script');
+script.src = "https://unpkg.com/mqtt/dist/mqtt.min.js";
+document.head.appendChild(script);
 
 // _____________________________________________ tab ID _______________________________________________________________
 // find the id of all the tabs open
