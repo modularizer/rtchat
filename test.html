@@ -1,38 +1,29 @@
-<!DOCTYPE html>
-<html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <title>RTChat</title>
-</head>
-<body>
 <script type="module">
-    import { MQTTRTCClient } from "./mqtt-rtc.js";
+    import { MQTTRTCClient } from "https://modularizer.github.io/rtchat/mqtt-rtc.js";
 
-const client = new MQTTRTCClient();
-client.on("connectionrequest", (user, userInfo) => {
-    console.log("connectionrequest", user, userInfo);
-    if (confirm("accept connection from " + user + "?")){
-        return Promise.resolve(true);
-    }else{
-        return Promise.resolve(false);
-    }
-});
-client.on("connectedtopeer", (user, userInfo) => {
-    console.log("connectedtopeer", user, userInfo);
-    window.peer = client.getPeer(user);
-});
-client.on("question", (question, sender) => {
-    console.log("received question", question);
-    if (question == "what is the answer to life, the universe, and everything?"){
-        return 42;
-    }
-    return "I don't know the answer";
-});
-client.on("answer", (answer, sender) => {
-    console.log("received answer", answer);
-});
+    const client = new MQTTRTCClient();
+    client.on("connectionrequest", (user, userInfo) => {
+        console.log("connectionrequest", user, userInfo);
+        if (confirm("accept connection from " + user + "?")){
+            return Promise.resolve(true);
+        }else{
+            return Promise.resolve(false);
+        }
+    });
+    client.on("connectedtopeer", (user, userInfo) => {
+        console.log("connectedtopeer", user, userInfo);
+        window.peer = client.getPeer(user);
+    });
+    client.on("question", (question, sender) => {
+        console.log("received question", question);
+        if (question == "what is the answer to life, the universe, and everything?"){
+            return 42;
+        }
+        return "I don't know the answer";
+    });
+    client.on("answer", (answer, sender) => {
+        console.log("received answer", answer);
+    });
 
-// peer.ask("what is the answer to life, the universe, and everything?").then(console.log);
+    // peer.ask("what is the answer to life, the universe, and everything?").then(console.log);
 </script>
-</body>
-</html>

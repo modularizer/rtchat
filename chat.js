@@ -232,5 +232,6 @@ class ChatBox extends HTMLElement {
 
 
 }
+customElements.define('chat-box', ChatBox);
 
 export { ChatBox };

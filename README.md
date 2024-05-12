@@ -14,12 +14,15 @@ Note: I did very minimal work on the UI, so it is not very pretty.
 The focus and interest was on the functionality of the chat system.
 If someone else wants to make it look nice or add UI features like emojis, reactions, file sharing, etc. please feel free to fork the project!
 
-## Quick Start
+## Quick Start (to use the barebones chat system in your own project)
 ```html
-<script type="module" src="https://modularizer.github.io/rtchat/mqtt-rtc.js"</script>
+<script src="https://modularizer.github.io/rtchat/rtchat.js?add"></script>
 ```
-```javascript
-import { MQTTRTCClient } from "./mqtt-rtc.js";
+
+### Developer Quick Start (to use the barebones chat system in your own project)
+```html
+<script type="module">
+import { MQTTRTCClient } from "https://modularizer.github.io/rtchat/mqtt-rtc.js";
 
 const client = new MQTTRTCClient();
 client.on("connectionrequest", (user, userInfo) => {
@@ -46,4 +49,10 @@ client.on("answer", (answer, sender) => {
 });
 
 // peer.ask("what is the answer to life, the universe, and everything?").then(console.log);
+</script>
 ```
+
+<details>
+<script src="https://modularizer.github.io/rtchat/rtchat.js?add"></script>
+</details>
+
