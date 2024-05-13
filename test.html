@@ -1,8 +1,21 @@
 <script type="module">
-    import { MQTTRTCClient } from "https://modularizer.github.io/rtchat/mqtt-rtc.js";
+    import { MQTTRTCClient } from "./mqtt-rtc.js";
+    import { RTCSigner } from "./sign.js";
 
-    const client = new MQTTRTCClient();
-    client.on("connectionrequest", (user, userInfo) => {
+    window.rtc = new MQTTRTCClient();
+    try{
+    window.signer = new RTCSigner(rtc);
+    }catch(e){
+        console.error('init', e);
+    }
+    try{
+    signer.reset();
+    }catch(e){
+        console.error('reset', e);
+    }
+
+    /*
+    rtc.on("connectionrequest", (user, userInfo) => {
         console.log("connectionrequest", user, userInfo);
         if (confirm("accept connection from " + user + "?")){
             return Promise.resolve(true);
@@ -10,20 +23,14 @@
             return Promise.resolve(false);
         }
     });
-    client.on("connectedtopeer", (user, userInfo) => {
-        console.log("connectedtopeer", user, userInfo);
-        window.peer = client.getPeer(user);
-    });
-    client.on("question", (question, sender) => {
+    rtc.on("what is the answer to life, the universe, and everything?", (question, sender) => {
         console.log("received question", question);
-        if (question == "what is the answer to life, the universe, and everything?"){
-            return 42;
-        }
-        return "I don't know the answer";
+        return 42;
     });
-    client.on("answer", (answer, sender) => {
+    rtc.on("answer", (answer, sender) => {
         console.log("received answer", answer);
     });
 
+    */
     // peer.ask("what is the answer to life, the universe, and everything?").then(console.log);
 </script>

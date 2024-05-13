@@ -488,7 +488,7 @@ class RTCConnection {
 
 
 class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
-  constructor(name, userInfo, config){
+  constructor(name, userInfo, questionHandlers, config){
     // initialize state tracking variables
     super(name, userInfo, config);
     Object.assign(this.rtcHandlers, this.extraRTCHandlers);
@@ -496,6 +496,11 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
         this.rtcHandlers[k] = v.bind(this);
     }
 
+    if (questionHandlers){
+        this.questionHandlers = questionHandlers;
+    }else if (!this.questionHandlers){
+        this.questionHandlers = {};
+    }
     this.questionPromises = {};
     this.latestPings = {};
     this.questionNumber = 0;
@@ -537,9 +542,14 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
     this.nextPing = this.nextPing.bind(this);
     this.nextPong = this.nextPong.bind(this);
 
+    this.addQuestionHandler = this.addQuestionHandler.bind(this);
+
 
 
   }
+  addQuestionHandler(name, handler){
+        this.questionHandlers[name] = handler;
+    }
 
   extraRTCHandlers = {
     dm: (data, sender) => {
@@ -697,7 +707,8 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
   onRTCChat(message, sender){
     console.log("Received chat from " + sender, message);
   }
-  sendRTCQuestion(question, target){
+  sendRTCQuestion(topic, content, target){
+    let question = {topic, content};
     let n = this.questionNumber;
     this.questionNumber++;
     let p = new DeferredPromise();
@@ -710,9 +721,22 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
     let {n, question} = data;
     console.log("Received question from " + sender, data);
     let answer = this.respondToQuestion(question, sender);
-    this.sendOverRTC("answer", {n, answer, question}, sender);
+    if (answer instanceof Promise){
+        answer.then((a) => {
+            this.sendOverRTC("answer", {n, answer: a, question}, sender);
+        });
+    }else{
+        this.sendOverRTC("answer", {n, answer, question}, sender);
+    }
   }
   respondToQuestion(question, sender){
+    let {topic, content} = question;
+    if (this.questionHandlers[topic]){
+        return this.questionHandlers[topic](content, sender);
+    }else{
+        console.warn("No handler found for question " + topic);
+        throw new Error("No handler found for question " + topic);
+    }
     return "I don't know."
   }
   onRTCAnswer(data, sender){
@@ -746,12 +770,12 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
 }
 
 class MQTTRTCClient extends PromisefulMQTTRTCClient {
-    constructor(name, userInfo, config){
+    constructor(name, userInfo, questionHandlers, config){
         // this.knownUsers = {name: userInfo, ...} of all users, even those we're not connected to
         // this.rtcConnections = {name: rtcConnection, ...} of active connections
         // this.connectedUsers = [name, ...] of all users we're connected to
 
-        super(name, userInfo, config);
+        super(name, userInfo, questionHandlers, config);
 
     }
     on(rtcevent, handler){
@@ -775,6 +799,8 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
             this.receivedPing = handler.bind(this);
         }else if (rtcevent === "mqtt"){
             this.onMQTTMessage = handler.bind(this);
+        }else{
+            this.addQuestionHandler(rtcevent, handler);
         }
     }
 
@@ -795,7 +821,9 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
 
     onRTCDM(data, sender){console.log("Received DM from " + sender, data);}
     onRTCChat(data, sender){console.log("Received chat from " + sender, data);}
-    respondToQuestion(question, sender){return "I don't know";}
+    addQuestionHandler(name, handler){
+        super.addQuestionHandler(name, handler);
+    }
 
     pingEveryone(){
         let start = Date.now();
