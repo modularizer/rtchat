@@ -58,7 +58,10 @@ client.on("answer", (answer, sender) => {
 * specifically, by default this chat will broadcast information related to your IP address (which every site you ever connect to on the internet already knows) to anyone else who has subscribed to the same mqtt broker and topic
 * basically, the signalling process as implemented right now is not secure, but also is not super sensitive information. it certainly could be made more secure, but there may not be much reason to do so
 * just make sure the person you are talking to ACTUALLY is the person you think you are talking to
-
+* sign.js implements a challenge/response system to verify the identity of the person you are talking to, but it is not fully implemented in the chat system yet
+  * the challenge/response system only works if you...
+    1. trust the person the first time you connect to them, you can verify on future times it is the same person
+    2. if you exchange public keys through some other method, you can call `Sign.register` to save that public key to the local storage
 
 
 
