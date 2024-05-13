@@ -67,9 +67,6 @@ class ChatBox extends HTMLElement {
 
         <div id="chat-body">
           <div id="active-users"></div>
-
-
-          <br/>
           <div id="messages"></div>
           <input id="input-message" type="text" placeholder="Type a message...">
           <button id="emoji-button" style="display: inline-block">👋</button>
@@ -132,10 +129,16 @@ class ChatBox extends HTMLElement {
     this.send = rtc.sendRTCChat;
     this.name = rtc.name;
     this.chatName.value = this.name;
-    this.chatRoom.value = rtc.topic;
-    rtc.onRTCChat = (message, sender) => {this.receive.bind(this)({data: message, sender: sender, timestamp: Date.now()})};
-    rtc.onConnectedToUser = this.onConnectedToUser.bind(this);
-    rtc.onDisconnectedFromUser = this.onDisconnectedFromUser.bind(this);
+    this.chatRoom.value = rtc.topic.substring(rtc.baseTopic.length);
+    rtc.on('chat', this.receiveRTCChat.bind(this));
+    rtc.on('connectedtopeer', this.onConnectedToUser.bind(this));
+    rtc.on('disconnectedfrompeer', this.onDisconnectedFromUser.bind(this));
+//    rtc.onRTCChat = (message, sender) => {this.receive.bind(this)({data: message, sender: sender, timestamp: Date.now()})};
+//    rtc.onConnectedToUser = this.onConnectedToUser.bind(this);
+//    rtc.onDisconnectedFromUser = this.onDisconnectedFromUser.bind(this);
+  }
+  receiveRTCChat(message, sender){
+    this.receive({data: message, sender: sender, timestamp: Date.now()});
   }
   setHistory(history){
     this.history = history;

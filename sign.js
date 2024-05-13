@@ -6,7 +6,7 @@ function loadKeys(generate=true) {
         return loadPrivateKey(localPrivateKey).then((privateKey) => {
             return loadPublicKey(localPublicKey).then((publicKey) => {
                 console.log("Loaded keys from local storage");
-                return {privateKey, publicKey};
+                return {privateKey, publicKey, dumpedPublicKey: localPublicKey, dumpedPrivateKey: localPrivateKey};
             });
         });
     }
@@ -14,9 +14,15 @@ function loadKeys(generate=true) {
         throw new Error("No keys found and generate is false");
     }
     return generateKeys().then((keys) => {
-        dumpKey(keys.privateKey).then(v => localStorage.setItem("privateKey", v));
-        dumpKey(keys.publicKey).then(v => localStorage.setItem("publicKey", v));
-        return keys;
+        return dumpKey(keys.privateKey).then(dumpedPrivateKey => {
+            localStorage.setItem("privateKey", dumpedPrivateKey);
+            keys.dumpedPrivateKey = dumpedPrivateKey;
+            return dumpKey(keys.publicKey).then(dumpedPublicKey => {
+                localStorage.setItem("publicKey", dumpedPublicKey);
+                keys.dumpedPublicKey = dumpedPublicKey;
+                return keys;
+            });
+        });
     });
 }
 
@@ -112,12 +118,21 @@ function signData(challenge, privateKey = null) {
 }
 
 function savePublicKey(peerName, publicKey) {
+    peerName = peerName.split("|")[0].split("(")[0].trim();
     let knownHosts = JSON.parse(localStorage.getItem("knownHosts") || "{}");
-    knownHosts[peerName] = dumpKey(publicKey);
-    localStorage.setItem("knownHosts", JSON.stringify(knownHosts));
+    if (publicKey instanceof CryptoKey) {
+        dumpKey(publicKey).then((v) => {
+            knownHosts[peerName] = v;
+            localStorage.setItem("knownHosts", JSON.stringify(knownHosts));
+        });
+    }else{
+        knownHosts[peerName] = publicKey;
+        localStorage.setItem("knownHosts", JSON.stringify(knownHosts));
+    }
 }
 
 function getPublicKey(peerName) {
+    peerName = peerName.split("|")[0].split("(")[0].trim();
     let knownHosts = JSON.parse(localStorage.getItem("knownHosts") || "{}");
     if (!knownHosts[peerName]) {
         return Promise.resolve(null);
@@ -147,8 +162,10 @@ class RTCSigner  {
         this.loaded = false;
         this.loadedPromise = new Promise((resolve, reject) => {
             loadKeys(generate).then((keys) => {
-                this.publicKey = keys.publicKey;
+                this._publicKey = keys.publicKey;
                 this._privateKey = keys.privateKey;
+                this.publicKey = keys.dumpedPublicKey;
+                this.name = rtc.name;
                 this.loaded = true;
                 resolve(true);
             });
@@ -158,6 +175,7 @@ class RTCSigner  {
         this.rtc = rtc;
 
         this.trust = this.trust.bind(this);
+        this._register = this._register.bind(this);
         this.register = this.register.bind(this);
         this.challenge = this.challenge.bind(this);
         this.untrust = this.untrust.bind(this);
@@ -165,7 +183,11 @@ class RTCSigner  {
         this.reset = this.reset.bind(this);
         this.clearPeerKeys = this.clearPeerKeys.bind(this);
         this.clearOwnKeys = this.clearOwnKeys.bind(this);
+
+        this.validatedCallbacks = [];
+        this.failedCallbacks = [];
     }
+
     get rtc() {
         return this._rtc;
     }
@@ -189,27 +211,43 @@ class RTCSigner  {
             }).bind(this), 1000);
         });
     }
+
+
     trustOrChallenge(peerName) {
         getPublicKey(peerName).then((publicKey) => {
             if (!publicKey) {
                 console.log("No public key found for " + peerName);
-                if (confirm("Do you want to trust " + peerName + " (who you have never met) is who they say they are?")) {
+                let shouldTrust = this.shouldTrust(peerName);
+                if (shouldTrust instanceof Promise) {
+                    shouldTrust.then((trust) => {
+                        if (trust) {
+                            this.trust(peerName);
+                        }else{
+                            this.untrust(peerName);
+                        }
+                    });
+                    return;
+                }else if (shouldTrust) {
                     this.trust(peerName);
+                }else{
+                    this.untrust(peerName);
                 }
             }else{
                 this.challenge(peerName);
             }
         });
     }
+    shouldTrust(peerName) {
+        return true;
+    }
     _returnPublicKey(challenge, senderName) {
-        return dumpKey(this.publicKey).then((dumpedKey) => {
+        return dumpKey(this._publicKey).then((dumpedKey) => {
             return signData(challenge, this._privateKey).then((signature) => {
                 let answer =  {"dumpedPublicKey": dumpedKey, "signature": signature};
                 return answer;
             });
         });
     }
-
     clearPeerKeys() {
         localStorage.removeItem("knownHosts");
     }
@@ -221,19 +259,21 @@ class RTCSigner  {
         this.clearPeerKeys();
         this.clearOwnKeys();
         let keys = loadKeys();
-        this.publicKey = keys.publicKey;
+        this._publicKey = keys.publicKey;
         this._privateKey = keys.privateKey;
         this.validatedPeers = [];
     }
     trust(peerName){
         /* trust a peer, assuming they give you a public key they are abe to sign, save that public key to their name */
-        let oldPublicKey = JSON.parse(localStorage.getItem("knownHosts") || "{}")[peerName];
-        if (oldPublicKey) {
-            throw new Error("Public key already exists for " + peerName);
-        }
+        let oldPublicKey = JSON.parse(localStorage.getItem("knownHosts") || "{}")[peerName.split("|")[0].split("(")[0].trim()];
+
         let challenge = makeChallenge();
         console.log("Requesting public key from " + peerName);
         this.rtc.sendRTCQuestion("identify", challenge, peerName).then(({dumpedPublicKey, signature}) => {
+             if (oldPublicKey && (oldPublicKey !== dumpedPublicKey)) {
+                console.error("Public key already exists for " + peerName, oldPublicKey, dumpedPublicKey);
+                throw new Error("Public key already exists for " + peerName);
+            }
             loadPublicKey(dumpedPublicKey).then((publicKey) => {
                 let knownHosts = JSON.parse(localStorage.getItem("knownHosts") || "{}");
 
@@ -241,26 +281,35 @@ class RTCSigner  {
                     if (valid) {
                         console.log("Signature valid for " + peerName + ", trusting and saving public key");
                         this.validatedPeers.push(peerName);
-                        this.register(peerName, publicKey);
+                        this._register(peerName, publicKey);
+                        this.onValidatedPeer(peerName, true);
                     } else {
                         console.error("Signature invalid for " + peerName);
                     }
                 }).catch((err) => {
                     console.error("Error verifying signature of "+ peerName, err);
                     this.untrust(peerName);
+                    this.onValidationFailed(peerName);
                     throw err;
                 });
             });
         })
     }
-    register(peerName, publicKey) {
+
+    _register(peerName, publicKey) {
         /* register a public key for a peer */
         if (!publicKey) {
             throw new Error("No public key provided for " + peerName);
         }
         let knownHosts = JSON.parse(localStorage.getItem("knownHosts") || "{}");
-        if (Object.values(knownHosts).includes(publicKey)) {
-            console.error("Public key already registered for another peer");
+        let matchingPeers = [];
+        for (let [name, key] of Object.entries(knownHosts)) {
+            if (key === publicKey) {
+                matchingPeers.push(name);
+            }
+        }
+        if (matchingPeers.length > 0) {
+            console.error("Public key already registered for another peer", matchingPeers);
             this.untrust(peerName);
             throw new Error("Public key already registered for another peer");
         }
@@ -270,18 +319,42 @@ class RTCSigner  {
         /* challenge a peer to prove they have the private key corresponding to the public key you have saved for them */
         getPublicKey(peerName).then((publicKey) => {
             console.log("Challenging " + peerName);
+            let challenge = makeChallenge();
             return this.rtc.sendRTCQuestion("challenge", challenge, peerName).then((signature) => {
                 return verifySignature(publicKey, signature, challenge).then((valid) => {
                     console.log("Signature valid for " + peerName, valid);
                     this.validatedPeers.push(peerName);
+                    this.onValidatedPeer(peerName);
                     return valid;
                 }, (err) => {
                     console.error("Error verifying signature of "+ peerName, err);
                     this.untrust(peerName);
+                    this.onValidationFailed(peerName);
                     throw err;
                 });
             });
         });
+    }
+    on(event, callback) {
+        if (event === "validation") {
+            this.validatedCallbacks.push(callback);
+        }else if (event === "validationfailure") {
+            this.failedCallbacks.push(callback);
+        }else{
+            throw new Error("Invalid event " + event);
+        }
+    }
+
+    onValidatedPeer(peerName, trusting=false) {
+        if (trusting) {
+            console.log("Trusting peer " + peerName + " is who they say they are.");
+        }
+        console.log("Peer " + peerName + " validated");
+        this.validatedCallbacks.forEach((cb) => cb(peerName, trusting));
+    }
+    onValidationFailed(peerName) {
+        console.error("Peer " + peerName + " validation failed");
+        this.failedCallbacks.forEach((cb) => cb(peerName));
     }
     untrust(peerName) {
         /* remove a public key from a peer */
@@ -302,8 +375,22 @@ class RTCSigner  {
         return signData(challenge, this._privateKey);
     }
 
+    register(identity) {
+        let [peerName, publicKey] = identity.split("|");
+        return this._register(peerName, publicKey);
+    }
+    get identity() {
+        if (rtc.name.includes("|")) {
+            throw new Error("Name cannot contain |");
+        }
+        return this.name + "|" + this.publicKey;
+    }
+
     get knownHosts() {
-        return JSON.parse(localStorage.getItem("knownHosts") || "{}");
+        let d = JSON.parse(localStorage.getItem("knownHosts") || "{}");
+        return Object.entries(d).map(([name, key]) => {
+            return name + "|" + key;
+        });
     }
 }
 

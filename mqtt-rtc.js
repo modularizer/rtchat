@@ -1,3 +1,52 @@
+// _____________________________________________ tab ID _______________________________________________________________
+
+// find the id of all the tabs open
+let existingTabs = JSON.parse(localStorage.getItem('tabs') || '[]');
+
+console.log("Existing tabs initial load: ", existingTabs);
+let timeNow = Date.now();
+for (let existingTabID of existingTabs){
+    let ts = localStorage.getItem("tabpoll_" + existingTabID);
+    if (ts){
+        let lastUpdateTime = new Date(1 * ts);
+        if ((lastUpdateTime == "Invalid Date") || ((timeNow - lastUpdateTime) > 300)){
+            console.log("removing tab", existingTabID, lastUpdateTime, (timeNow - lastUpdateTime))
+            localStorage.removeItem("tabpoll_" + existingTabID);
+            existingTabs = existingTabs.filter(v=>v!==existingTabID);
+            localStorage.setItem('tabs', JSON.stringify(existingTabs));
+        }
+    }else{
+        console.warn("No timestamp found for tab " + existingTabID);
+        localStorage.removeItem("tabpoll_" + existingTabID);
+        existingTabs = existingTabs.filter(v=>v!==existingTabID);
+        localStorage.setItem('tabs', JSON.stringify(existingTabs));
+    }
+}
+existingTabs = JSON.parse(localStorage.getItem('tabs') || '[]');
+
+console.log("Existing tabs filtered: ", existingTabs);
+
+let maxTabID = existingTabs.length?(Math.max(...existingTabs)):-1;
+let minTabID = existingTabs.length?(Math.min(...existingTabs)):-1;
+let tabID = (minTabID<10)?(maxTabID + 1):0;
+existingTabs.push(tabID);
+localStorage.setItem('tabs', JSON.stringify(existingTabs));
+
+
+localStorage.setItem("tabpoll_" + tabID, Date.now().toString());
+let tabInterval = setInterval(() => {
+    localStorage.setItem("tabpoll_" + tabID, Date.now().toString());
+}, 250);
+console.log("Tab ID: ", tabID);
+
+// When the tab is closed or reloaded, decrement the count and notify other tabs
+//window.addEventListener('beforeunload', function () {
+//  console.log("beforeunload of tab " + tabID);
+//  clearInterval(tabInterval);
+//  localStorage.setItem('tabs', JSON.stringify(JSON.parse(localStorage.getItem('tabs') || '[]').filter(v=>v!==tabID)));
+//});
+//___________________________________________________________________________________________________________________
+
 // automatically load the MQTT library
 let script = document.createElement('script');
 script.src = "https://unpkg.com/mqtt/dist/mqtt.min.js";
@@ -11,33 +60,8 @@ if (lz){
 }
 
 
-// _____________________________________________ tab ID _______________________________________________________________
-// find the id of all the tabs open
-let tabs = localStorage.getItem('tabs');
-let existingTabs = tabs?JSON.parse(tabs):[];
 
-// If there are more than 10 tabs open, clear the list of tabs
-if (existingTabs.length > 10){
-    existingTabs = [];
-    localStorage.removeItem('tabs');
-}
-// Generate a unique ID for the current tab
-const randomTabID = Math.floor(Math.random() * 1000000000)
-let tabID = Math.max(...existingTabs.map(v=>1*v.split("_")[0]), 0) + 1;
-const fullTabID = tabID + "_" + randomTabID;
-// Add the tab ID to the list of tabs stored in local storage
-existingTabs.push(fullTabID);
-localStorage.setItem('tabs', JSON.stringify(existingTabs));
 
-console.log("Tab ID: ", tabID);
-
-// When the tab is closed or reloaded, decrement the count and notify other tabs
-window.addEventListener('beforeunload', function () {
-  tabs = localStorage.getItem('tabs');
-  existingTabs = tabs?JSON.parse(tabs):[];
-  existingTabs = existingTabs.filter(v=>v!==fullTabID);
-  localStorage.setItem('tabs', JSON.stringify(existingTabs));
-});
 //__________________________________________ DEFERRED PROMISE __________________________________________________________
 class DeferredPromise {
     constructor() {
@@ -74,12 +98,22 @@ class BaseMQTTRTCClient {
   constructor(name, userInfo, config){
     // specify a tabID to allow multiple tabs to be open at once
     name = name || defaultConfig.name
-    // save the name to local storage to persist it
-    localStorage.setItem("name", name);
-    this.name = name + "_" + tabID;
+    if (name.includes("(") || name.includes(")") || name.includes("|")){
+        throw new Error("Name cannot contain (, ), or |")
+    }
+    if (name != name.trim()){
+        throw new Error("Name cannot have leading or trailing spaces")
+    }
+    if (!name.startsWith("anon")){
+        // save the name to local storage to persist it
+        localStorage.setItem("name", name);
+    }
+    this.name = name + (tabID?('(' + tabID + ')'):''); // add the tab ID to the name
     this.userInfo = userInfo || {};
 
     let {baseTopic, topic, broker, stunServer} = config || {};
+
+    console.log("Config: ", config, topic);
 
 
     this.mqttBroker = broker || defaultConfig.broker;
@@ -180,7 +214,7 @@ class BaseMQTTRTCClient {
     console.log("Received message from " + sender + " on " + subtopic, data);
   }
   beforeunload(){
-    this.sendOverRTC("beforeunload");
+    this.postPubliclyToMQTTServer("bu", "disconnecting");
   }
   postPubliclyToMQTTServer(subtopic, data){
     let payload = {
@@ -776,29 +810,38 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         // this.connectedUsers = [name, ...] of all users we're connected to
 
         super(name, userInfo, questionHandlers, config);
+        this.onConnectedCallbacks = [];
+        this.onDisconnectedCallbacks = [];
+        this.onNameChangeCallbacks = [];
+        this.onDMCallbacks = [];
+        this.onChatCallbacks = [];
+        this.receivePingCallbacks = [];
+        this.onRTCQuestionCallbacks = [];
+        this.onRTCAnswerCallbacks = [];
+        this.onMQTTMessageCallbacks = [];
 
     }
     on(rtcevent, handler){
         if (rtcevent === "connectionrequest"){
             this.shouldConnectToUser = handler.bind(this);
         }else if(rtcevent === "connectedtopeer"){
-            this.onConnectedToUser = handler.bind(this);
+            this.onConnectedCallbacks.push(handler.bind(this));
         }else if (rtcevent === "disconnectedfrompeer"){
-            this.onDisconnectedFromUser = handler.bind(this);
+            this.onDisconnectedCallbacks.push(handler.bind(this));
         }else if (rtcevent === "namechange"){
-            this.onNameChange = handler.bind(this);
+            this.onNameChangeCallbacks.push(handler.bind(this));
         }else if (rtcevent === "dm"){
-            this.onRTCDM = handler.bind(this);
+            this.onDMCallbacks.push(handler.bind(this));
         }else if (rtcevent === "chat"){
-            this.onRTCChat = handler.bind(this);
+            this.onChatCallbacks.push(handler.bind(this));
         }else if (rtcevent === "question"){
-            this.respondToQuestion = handler.bind(this);
+//            this.respondToQuestion = handler.bind(this);
         }else if (rtcevent === "answer"){
-            this.onRTCAnswer = handler.bind(this);
+            this.onRTCAnswerCallbacks.push(handler.bind(this));
         }else if (rtcevent === "ping"){
-            this.receivedPing = handler.bind(this);
+            this.receivedPingCallbacks.push(handler.bind(this));
         }else if (rtcevent === "mqtt"){
-            this.onMQTTMessage = handler.bind(this);
+            this.onMQTTMessageCallbacks.push(handler.bind(this));
         }else{
             this.addQuestionHandler(rtcevent, handler);
         }
@@ -816,11 +859,22 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
     }
 
     onConnectedToMQTT(){console.log("Connected to MQTT");}
-    onConnectedToUser(user){console.log("Connected to user ", user);}
-    onDisconnectedFromUser(user){console.log("Disconnected from user ", user);}
-
-    onRTCDM(data, sender){console.log("Received DM from " + sender, data);}
-    onRTCChat(data, sender){console.log("Received chat from " + sender, data);}
+    onConnectedToUser(user){
+        console.log("Connected to user ", user);
+        this.onConnectedCallbacks.forEach(h => h(user));
+    }
+    onDisconnectedFromUser(user){
+        console.log("Disconnected from user ", user);
+        this.onDisconnectedCallbacks.forEach(h => h(user));
+    }
+    onRTCDM(data, sender){
+        console.log("Received DM from " + sender, data);
+        this.onDMCallbacks.forEach(h => h(data, sender));
+    }
+    onRTCChat(data, sender){
+        console.log("Received chat from " + sender, data);
+        this.onChatCallbacks.forEach(h => h(data, sender));
+    }
     addQuestionHandler(name, handler){
         super.addQuestionHandler(name, handler);
     }
@@ -838,7 +892,10 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
             console.log("Pinged " + user + " in " + (Date.now() - start) + "ms");
         });
     }
-    receivedPing(sender){console.log("Received ping from " + sender);}
+    receivedPing(sender){
+        console.log("Received ping from " + sender);
+        this.receivedPingCallbacks.forEach(h => h(sender));
+    }
 
     // nextUserConnection is a promise that resolves when the client connects to a new user
     get nextDMPromise() {return this.nextDM();}

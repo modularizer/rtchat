@@ -2,17 +2,10 @@
     import { MQTTRTCClient } from "./mqtt-rtc.js";
     import { RTCSigner } from "./sign.js";
 
-    window.rtc = new MQTTRTCClient();
-    try{
+
+    window.rtc = new MQTTRTCClient('james');
     window.signer = new RTCSigner(rtc);
-    }catch(e){
-        console.error('init', e);
-    }
-    try{
-    signer.reset();
-    }catch(e){
-        console.error('reset', e);
-    }
+    //signer.reset();
 
     /*
     rtc.on("connectionrequest", (user, userInfo) => {
