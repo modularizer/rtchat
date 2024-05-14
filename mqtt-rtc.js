@@ -95,7 +95,7 @@ let defaultConfig = {
 
 
 class BaseMQTTRTCClient {
-  constructor(name, userInfo, config){
+  constructor(name, userInfo, config, load=true){
     // specify a tabID to allow multiple tabs to be open at once
     name = name || defaultConfig.name
     if (name.includes("(") || name.includes(")") || name.includes("|")){
@@ -158,7 +158,9 @@ class BaseMQTTRTCClient {
     this.knownUsers = {};
 
     // load the MQTT client
-    this.load();
+    if (load){
+        this.load();
+    }
   }
   //________________________________________________________ MQTT BASICS _______________________________________________
   load(){
@@ -370,8 +372,16 @@ class BaseMQTTRTCClient {
         serializedData = (handler.serializer || JSON.stringify)(data);
     }
     for (let user of this.connectionsToUsers(users)){
-        this.rtcConnections[user].send(channel, serializedData);
+        if (!this.verifyUser(channel, data, user)){
+            console.warn("Not connected to " + user);
+            continue;
+        }else{
+            this.rtcConnections[user].send(channel, serializedData);
+        }
     }
+  }
+  verifyUser(channel, data, user){
+    return true;
   }
 
   //____________________________________________________________________________________________________________________
@@ -472,8 +482,8 @@ class RTCConnection {
             return;
         }
         this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-        this.mqttClient.onConnectedToUser(this.target);
         this.loadPromise.then((() => this.send("connectedViaRTC", null)).bind(this));
+        this.mqttClient.onConnectedToUser(this.target);
     }
     send(channel, serializedData){
         let dataChannel = this.dataChannels[channel];
@@ -522,9 +532,9 @@ class RTCConnection {
 
 
 class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
-  constructor(name, userInfo, questionHandlers, config){
+  constructor(name, userInfo, questionHandlers, config, load=true){
     // initialize state tracking variables
-    super(name, userInfo, config);
+    super(name, userInfo, config, false);
     Object.assign(this.rtcHandlers, this.extraRTCHandlers);
     for (let [k, v] of Object.entries(this.rtcHandlers)){
         this.rtcHandlers[k] = v.bind(this);
@@ -578,8 +588,9 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
 
     this.addQuestionHandler = this.addQuestionHandler.bind(this);
 
-
-
+    if (load){
+        this.load();
+    }
   }
   addQuestionHandler(name, handler){
         this.questionHandlers[name] = handler;
@@ -804,12 +815,12 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
 }
 
 class MQTTRTCClient extends PromisefulMQTTRTCClient {
-    constructor(name, userInfo, questionHandlers, config){
+    constructor(name, userInfo, questionHandlers, config, load=true){
         // this.knownUsers = {name: userInfo, ...} of all users, even those we're not connected to
         // this.rtcConnections = {name: rtcConnection, ...} of active connections
         // this.connectedUsers = [name, ...] of all users we're connected to
 
-        super(name, userInfo, questionHandlers, config);
+        super(name, userInfo, questionHandlers, config, false);
         this.onConnectedCallbacks = [];
         this.onDisconnectedCallbacks = [];
         this.onNameChangeCallbacks = [];
@@ -819,6 +830,10 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         this.onRTCQuestionCallbacks = [];
         this.onRTCAnswerCallbacks = [];
         this.onMQTTMessageCallbacks = [];
+
+        if (load){
+            this.load();
+        }
 
     }
     on(rtcevent, handler){

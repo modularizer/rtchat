@@ -1,11 +1,15 @@
 import { ChatBox } from "./chat.js";
-import { MQTTRTCClient } from "./mqtt-rtc.js";
-import { RTCSigner } from "./sign.js";
+import { SignedMQTTRTCClient } from "./signed-mqtt-rtc.js";
 
 
 class RTChat extends ChatBox {
     constructor() {
         super();
+        this.prompt = this.prompt.bind(this);
+        this.notify = this.notify.bind(this);
+        this.shouldConnectToKnownPeer = this.shouldConnectToKnownPeer.bind(this);
+        this.shouldConnectToUnknownPeer = this.shouldConnectToUnknownPeer.bind(this);
+
         let topic = localStorage.getItem('topic') || 'chat';
         this.chatRoom.value = topic;
         this.chatRoom.addEventListener('change', () => {
@@ -17,37 +21,54 @@ class RTChat extends ChatBox {
     }
     connectRTC() {
         let topic = localStorage.getItem('topic') || 'chat';
-        this.rtc = new MQTTRTCClient(null, {}, {}, {
+        this.rtc = new SignedMQTTRTCClient(null, {}, {}, {
             topic: topic
         });
-        this.signer = new RTCSigner(this.rtc);
-        this.signer.shouldTrust = this.shouldTrust.bind(this);
-        this.signer.on('validation', (peerName, trusted) => {
+        this.rtc.shouldTrust = (peerName) => {return Promise.resolve(true)};
+        this.rtc.shouldConnectToKnownPeer = this.shouldConnectToKnownPeer.bind(this);
+        this.rtc.shouldConnectToUnknownPeer = this.shouldConnectToUnknownPeer;
+        this.rtc.on('validation', (peerName, trusted) => {
             if (trusted) {
-                this._addMessage(`Trusted ${peerName}`);
+                this.notify(`Trusted ${peerName}`);
             } else {
-                this._addMessage(`Validated ${peerName}`);
+                this.notify(`Validated ${peerName}`);
             }
         })
-        this.signer.on('validationfailure', (peerName, message) => {
-            this._addMessage(`Validation failed for ${peerName}`);
+        this.rtc.on('validationfailure', (peerName, message) => {
+            this.notify(`Validation failed for ${peerName}`);
         });
     }
-    _addMessage(message) {
+    notify(message) {
         let el = document.createElement('div');
         el.innerHTML = message;
         el.style.color = 'gray';
         el.style.fontSize = '0.8em';
         this.messagesEl.appendChild(el);
     }
-    shouldTrust(peerName) {
+    shouldConnectToKnownPeer(peerName, userInfo, peerNames) {
+        let bareName = peerName.split('|')[0].split('(')[0].trim();
+        if (peerNames.includes(bareName)) {
+            let otherNames = peerNames.filter((name) => name !== bareName);
+            let o = (otherNames.length > 1) ? (' (also known as ' + otherNames.join(', ') + ')') : '';
+            this.notify('Connecting to ' + peerName + o);
+            return Promise.resolve(true);
+        }else{
+            let otherNames = peerNames.filter((name) => name !== bareName);
+            let o = (otherNames.length > 1) ? (" who's key matches " + otherNames.join(', ') + ')') : '';
+            return this.prompt(`Do you want to connect to ${peerName}${o}?`);
+        }
+    }
+    shouldConnectToUnknownPeer(peerName) {
+        return this.prompt(`Do you want to connect to ${peerName} (who you have not met)?`);
+    }
+
+    prompt(question) {
         let promise = new Promise((resolve, reject) => {
             let el = document.createElement('div');
-            el.innerHTML = `Do you trust ${peerName}?`;
+            el.innerHTML = question;
             let yes = document.createElement('button');
             yes.innerHTML = "Yes";
             yes.onclick = () => {
-                this.signer.trust(peerName);
                 el.remove();
                 resolve(true);
             };
@@ -65,9 +86,8 @@ class RTChat extends ChatBox {
     }
 }
 
-window.ChatBox = ChatBox;
 window.RTChat = RTChat;
-window.MQTTRTCClient = MQTTRTCClient;
+window.SignedMQTTRTCClient = SignedMQTTRTCClient;
 
 customElements.define('rtc-hat', RTChat);
 
