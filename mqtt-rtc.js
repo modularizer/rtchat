@@ -738,7 +738,7 @@ class RTCConnection {
 
 
 class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
-    constructor({name, userInfo, questionHandlers, config, load}){
+    constructor({name, userInfo, questionHandlers, handlers, config, load}){
     if (load === undefined){
         load = true;
     }
@@ -747,6 +747,7 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
     super({name, userInfo, config, load: false});
 
     Object.assign(this.rtcHandlers, this.extraRTCHandlers);
+    Object.assign(this.rtcHandlers, handlers || {});
     for (let [k, v] of Object.entries(this.rtcHandlers)){
         this.rtcHandlers[k] = v.bind(this);
     }
@@ -805,7 +806,7 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
   }
   addQuestionHandler(name, handler){
         this.questionHandlers[name] = handler;
-    }
+  }
 
   extraRTCHandlers = {
     dm: (data, sender) => {
@@ -876,7 +877,7 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
             this.nextPongPromises[sender].resolve(data);
             delete this.nextPongPromises[sender];
         }
-    }
+    },
   }
 
   onConnectedToMQTT(){
@@ -1028,7 +1029,7 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
 }
 
 class MQTTRTCClient extends PromisefulMQTTRTCClient {
-    constructor({name, userInfo, questionHandlers, config, load}){
+    constructor({name, userInfo, questionHandlers, handlers, config, load}){
         // this.knownUsers = {name: userInfo, ...} of all users, even those we're not connected to
         // this.rtcConnections = {name: rtcConnection, ...} of active connections
         // this.connectedUsers = [name, ...] of all users we're connected to
@@ -1165,6 +1166,9 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
     }
     get peerList(){
         return Object.values(this.peers);
+    }
+    send(data, channel = 'chat', users){
+        return super.sendOverRTC(channel, data, users);
     }
 }
 
