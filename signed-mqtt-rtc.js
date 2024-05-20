@@ -444,6 +444,15 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
             pretender: trustLevels.reject,
             nevermet: trustLevels.promptandtrust
         },
+        lax: {
+            theoneandonly: trustLevels.connectandtrust,
+            knownwithknownaliases: trustLevels.connectandtrust,
+            possiblenamechange: trustLevels.connectandtrust,
+            possiblesharedpubkey: trustLevels.connectandtrust,
+            nameswapcollision: trustLevels.promptandtrust,
+            pretender: trustLevels.promptandtrust,
+            nevermet: trustLevels.connectandtrust
+        },
         unsafe:{
             theoneandonly: trustLevels.connectandtrust,
             knownwithknownaliases: trustLevels.connectandtrust,
