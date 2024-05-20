@@ -6,6 +6,9 @@ import { VideoChat } from "./video-chat.js";
 class RTChat extends ChatBox {
     constructor(config) {
         super();
+        if (config.hideRoom){
+            this.room.style.display = "none";
+        }
         this.prompt = this.prompt.bind(this);
         this.notify = this.notify.bind(this);
         this.connectionrequest = this.connectionrequest.bind(this);
