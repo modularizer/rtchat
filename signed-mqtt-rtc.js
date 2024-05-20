@@ -38,6 +38,11 @@ class Keys {
         this.loaded = false;
         this.loadedPromise = this._loadKeys(generate).then((keys) => {
             this._knownHostsStrings = JSON.parse(localStorage.getItem("knownHostsStrings") || "{}");
+            for (let [name, key] of Object.entries(this._knownHostsStrings)) {
+                if (name.startsWith("anon")){
+                    delete this._knownHostsStrings[name];
+                }
+            }
             this._knownHostsKeys = {};
             this._privateKey = keys.privateKey;
             this._publicKey = keys.publicKey;
