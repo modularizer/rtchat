@@ -257,6 +257,7 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         }else{
             this.trustConfig = trustMode;
         }
+        console.warn("Trust mode", trustMode, this.trustConfig);
         if (!this.trustConfig || Object.keys(this.userCategories).map((category) => this.trustConfig[category]).some((level) => level === undefined)){
             throw new Error("Invalid trust mode");
         }
@@ -288,7 +289,7 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         }
     }
     verifyUser(channel, data, peerName) {
-        console.log("Verifying user", channel, data, peerName);
+        console.log("Verifying user", channel, data, peerName, this.validatedPeers);
         if (["question", "answer"].includes(channel) && ["identify", "challenge"].includes(data.question.topic)) {
             return true;
         }
@@ -297,6 +298,23 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
 
     _getFullUserInfo(peerName, userInfo) {
         let _bareName = peerName.split('|')[0].split('(')[0].trim();
+        if (_bareName.startsWith("anon")) {
+            return {
+                peerName: peerName,
+                bareName: _bareName,
+                userInfo: userInfo,
+                providedPubKey: false,
+                knownPubKey: false,
+                knownName: false,
+                otherNamesForPubKey: [],
+                otherPubKeyForName: null,
+                completedChallenge: false,
+                explanation: "anonymous",
+                suspiciousness: suspicionLevels.nonsuspicious,
+                category: "nevermet",
+                hint: "anon"
+            }
+        }
         let providedPubKey = !!userInfo.publicKeyString;
         let peerNames = providedPubKey?this.keys.getPeerNames(userInfo.publicKeyString):[];
         let _opk = this.keys.getPublicKeyString(_bareName);
@@ -575,6 +593,7 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
                     console.log("Signature valid for " + peerName + ", trusting and saving public key");
                     this.keys.savePublicKeyString(peerName, publicKeyString);
                     this.onValidatedPeer(peerName, true);
+                    this.validatedPeers.push(peerName);
                     return true;
                 } else {
                     console.error("Signature invalid for " + peerName);
@@ -594,7 +613,9 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
             return this.keys.verify(publicKeyString, signature, challengeString).then((valid) => {
                 console.log("Signature valid for " + peerName, valid);
                 this.validatedPeers.push(peerName);
+                console.log("Validated peers", this.validatedPeers);
                 this.onValidatedPeer(peerName);
+
                 return valid;
             }, (err) => {
                 console.error("Error verifying signature of "+ peerName, err);
@@ -629,11 +650,13 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
     }
     untrust(peerName) {
         /* remove a public key from a peer */
+
         this.keys.removePublicKey(peerName);
+        console.error("Untrusting peer " + peerName, this.validatedPeers);
         if (this.validatedPeers.includes(peerName)) {
             this.validatedPeers = this.validatedPeers.filter((name) => name !== peerName);
         }
-        console.error("Disconnecting from untrusted peer " + peerName);
+        console.error("Disconnecting from untrusted peer " + peerName, this.validatedPeers);
         this.disconnectFromUser(peerName);
     }
     _sign(challengeString, peerName) {return this.keys.sign(challengeString);}

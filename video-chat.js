@@ -7,29 +7,42 @@ class VideoChat extends HTMLElement {
                 #container {
                     position: relative;
                     width: 100%;
-                    max-width: 640px; /* Adjust as needed */
-                    margin: auto;
+                    height: 100%; /* Full height of the container */
+                    max-width: 50vw;
+                    max-height: 50vh;
+                    display: flex;
+                    justify-content: center;
+                    align-items: center;
+                }
+
+                #remoteVideo, #localVideo {
+                    max-width: 100%;
+                    height: auto; /* Maintain aspect ratio */
                 }
 
                 #remoteVideo {
-                    width: 100%;
-                    height: auto;
+                    width: 100%; /* Full width of the container */
+                    max-width: 50vw;
+                    max-height: 50vh;
                 }
 
                 #localVideo {
                     position: absolute;
-                    width: 25%; /* Adjust as needed */
-                    top: 10px; /* Adjust as needed */
-                    right: 10px; /* Adjust as needed */
+                    width: 20%; /* Smaller size for local video */
+                    top: 10px;
+                    right: 10px;
                     border: 2px solid white;
                     box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+                    max-height: 100%;
                 }
+
             </style>
             <div id="container">
                 <video id="remoteVideo" autoplay playsinline></video>
                 <video id="localVideo" autoplay playsinline muted></video>
             </div>
         `;
+        window.addEventListener('resize', this.resize.bind(this));
         this.show = this.show.bind(this);
         this.close = this.close.bind(this);
         this._rtc = null;
@@ -94,6 +107,22 @@ class VideoChat extends HTMLElement {
         this.localVideo.srcObject = null;
         this.remoteVideo.srcObject = null;
     }
+    resize() {
+        // Optionally adjust the size based on the window size or other conditions
+        const container = this.shadowRoot.getElementById('container');
+        const width = window.innerWidth;
+        const height = window.innerHeight;
+
+        // Example: Adjust max-width/max-height based on conditions
+        container.style.maxWidth = width > 600 ? '50vw' : '80vw';
+        container.style.maxHeight = height > 600 ? '50vh' : '80vh';
+    }
+
+    // Don't forget to remove the event listener when the element is disconnected
+    disconnectedCallback() {
+        window.removeEventListener('resize', this.resize.bind(this));
+    }
+
 }
 
 customElements.define('video-chat', VideoChat);

@@ -7,6 +7,7 @@ class RTChat extends ChatBox {
     constructor(config) {
         super();
         config = config || {};
+        console.log("RTChat", config);
 
         if (!config.showRoomInput){
             this.chatRoomBox.style.display = "none";
@@ -18,10 +19,10 @@ class RTChat extends ChatBox {
         this.chatRoom.value = topic;
         this.chatRoom.addEventListener('change', () => {
             localStorage.setItem('topic', this.chatRoom.value);
-            this.connectRTC();
+            this.connectRTC(config);
         })
         this.connectRTC = this.connectRTC.bind(this);
-        this.connectRTC();
+        this.connectRTC(config);
         this.vc = new VideoChat(this.rtc);
         this.calling = null;
     }
@@ -30,6 +31,7 @@ class RTChat extends ChatBox {
         let topic = localStorage.getItem('topic') || 'chat';
         config.topic = config.topic || topic;
         config.trustMode = config.trustMode || 'moderate';
+        console.warn("Connecting", config);
         this.rtc = new SignedMQTTRTCClient(config);
         this.rtc.shouldTrust = (peerName) => {return Promise.resolve(true)};
         this.rtc.on('connectionrequest', this.connectionrequest);
