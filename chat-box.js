@@ -63,7 +63,7 @@ class ChatBox extends HTMLElement {
       </style>
       <div id="chat-container">
         <div id="chat-header">
-            <div>
+            <div id='chat-room-box'>
                 room: <input id="chat-room" style="width: 100px" class="rounded">
             </div>
             <div>
@@ -91,6 +91,7 @@ class ChatBox extends HTMLElement {
     this.endCallButton = this.shadowRoot.getElementById('end-call-button');
     this.chatBody = this.shadowRoot.getElementById('chat-body');
     this.chatRoom = this.shadowRoot.getElementById('chat-room');
+    this.chatRoomBox = this.shadowRoot.getElementById('chat-room-box');
     this.chatName = this.shadowRoot.getElementById('chat-name');
     this.activeUsersEl = this.shadowRoot.getElementById('active-users');
     this.messagesEl = this.shadowRoot.getElementById('messages');

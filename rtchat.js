@@ -7,7 +7,7 @@ class RTChat extends ChatBox {
     constructor(config) {
         super();
         if (config.hideRoom){
-            this.chatRoom.style.display = "none";
+            this.chatRoomBox.style.display = "none";
         }
         this.prompt = this.prompt.bind(this);
         this.notify = this.notify.bind(this);
