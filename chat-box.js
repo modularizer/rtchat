@@ -17,12 +17,7 @@ class ChatBox extends HTMLElement {
     this.attachShadow({ mode: 'open' });
     this.shadowRoot.innerHTML = `
       <style>
-        @media only screen and (max-width: 1000px){
-          * {
-            font-size: 12px; /* twice as big as the default size */
-          }
 
-        }
         .rounded {
             border-radius: 5px;
         }
@@ -33,6 +28,7 @@ class ChatBox extends HTMLElement {
           border: 1px solid #ccc;
           background-color: #f9f9f9;
           border-radius: 10px;
+          min-width: 300px;
         }
         #chat-header {
           cursor: pointer;
@@ -54,8 +50,18 @@ class ChatBox extends HTMLElement {
           margin-bottom: 10px;
         }
 
+        @media only screen and (max-width: 1000px){
+          * {
+            font-size: 3em; /* twice as big as the default size */
+            #chat-container {
+                min-width: 50vw !important;
+            }
+          }
+
+        }
+
       </style>
-      <div id="chat-container" style="min-width: 300px">
+      <div id="chat-container">
         <div id="chat-header">
             <div>
                 room: <input id="chat-room" style="width: 100px" class="rounded">
