@@ -114,7 +114,7 @@ window.SignedMQTTRTCClient = SignedMQTTRTCClient;
 
 customElements.define('rtc-hat', RTChat);
 
-if (['t','true','yes','y','1'].includes(new URL(import.meta.url).searchParams.get('add').toLowerCase())) {
+if (['t','true','yes','y','1'].includes((new URL(import.meta.url).searchParams.get('add') || "").toLowerCase())) {
     window.addEventListener('load', () => {
         document.body.appendChild(document.createElement('rtc-hat'));
     });
