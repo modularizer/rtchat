@@ -52,7 +52,7 @@ class ChatBox extends HTMLElement {
 
         @media only screen and (max-width: 1000px){
           * {
-            font-size: 3em; /* twice as big as the default size */
+            font-size: 24px; /* twice as big as the default size */
             #chat-container {
                 min-width: 50vw !important;
             }
