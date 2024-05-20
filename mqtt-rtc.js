@@ -360,9 +360,12 @@ class BaseMQTTRTCClient {
     if (existingConnection && existingConnection.peerConnection.connectionState === "connected"){
         return existingConnection
     }else if (existingConnection){
-        console.warn("Already have a connection to " + user + " but it's not connected.", existingConnection.peerConnection.connectionState,"  Closing and reopening.");
-        this.disconnectFromUser(user);
-        return null;
+        console.warn("Already have a connection to " + user + " but it's not connected.", existingConnection.peerConnection.connectionState);
+        return existingConnection;
+//        console.warn("Already have a connection to " + user + " but it's not connected.", existingConnection.peerConnection.connectionState,"  Closing and reopening.");
+//        this.disconnectFromUser(user);
+//        return null;
+
     }
     return null;
   }
