@@ -475,23 +475,23 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
                     throw new Error("knownPubKey should mean that this pubkey matches at least one name so if knownName is false then there should be at least one other name for this pubkey");
                 }else if (info.otherNamesForPubKey.length === 1) { // we know this pubkey by one other name
                     if (info.otherPubKeyForName) {
-                        return userCategories.nameswapcollision; // we know this pubkey by one other name and we know another pubkey by this name : VERY SUSPICIOUS
+                        return this.userCategories.nameswapcollision; // we know this pubkey by one other name and we know another pubkey by this name : VERY SUSPICIOUS
                     }else{
-                        return userCategories.possiblenamechange; // we know this pubkey by one other name and we don't know another pubkey by this name
+                        return this.userCategories.possiblenamechange; // we know this pubkey by one other name and we don't know another pubkey by this name
                     }
                 }else{// we know this pubkey by more than one other name
                     if (info.otherPubKeyForName) {
-                        return userCategories.nameswapcollision; // we know this pubkey by more than one other name and we know another pubkey by this name : VERY SUSPICIOUS
+                        return this.userCategories.nameswapcollision; // we know this pubkey by more than one other name and we know another pubkey by this name : VERY SUSPICIOUS
                     }else{
-                        return userCategories.possiblesharedpubkey; // we know this pubkey by more than one other name and we don't know another pubkey by this name
+                        return this.userCategories.possiblesharedpubkey; // we know this pubkey by more than one other name and we don't know another pubkey by this name
                     }
                 }
             }
         }else{
             if (info.otherPubKeyForName) {
-                return userCategories.pretender;
+                return this.userCategories.pretender;
             }else{
-                return userCategories.nevermet;
+                return this.userCategories.nevermet;
             }
         }
     }
