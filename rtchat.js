@@ -4,7 +4,7 @@ import { VideoChat } from "./video-chat.js";
 
 
 class RTChat extends ChatBox {
-    constructor() {
+    constructor(config) {
         super();
         this.prompt = this.prompt.bind(this);
         this.notify = this.notify.bind(this);
@@ -20,12 +20,11 @@ class RTChat extends ChatBox {
         this.vc = new VideoChat(this.rtc);
         this.calling = null;
     }
-    connectRTC() {
+    connectRTC(config) {
         let topic = localStorage.getItem('topic') || 'chat';
-        this.rtc = new SignedMQTTRTCClient({
-            trustMode: 'moderate',
-            config: {topic}
-        });
+        config.topic = config.topic || topic;
+        config.trustMode = config.trustMode || 'moderate';
+        this.rtc = new SignedMQTTRTCClient(config);
         this.rtc.shouldTrust = (peerName) => {return Promise.resolve(true)};
         this.rtc.on('connectionrequest', this.connectionrequest);
         this.incomingCalls = {};
