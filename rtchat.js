@@ -120,3 +120,5 @@ if (['t','true','yes','y','1'].includes(new URL(import.meta.url).searchParams.ge
         document.body.appendChild(document.createElement('rtc-hat'));
     });
 }
+
+export { RTChat, SignedMQTTRTCClient, VideoChat };
