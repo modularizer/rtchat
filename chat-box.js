@@ -69,7 +69,8 @@ class ChatBox extends HTMLElement {
         <div id="chat-body">
           <div id="active-users"></div>
           <div id="messages"></div>
-          <button id="call-button" style="display: none">📞</button>
+          <button id="call-button" style="display: none;color:green">&#x260E;</button>
+          <button id="end-call-button" style="display: none;color:red">&#x260E;</button>
           <input id="input-message" type="text" placeholder="Type a message...">
           <button id="emoji-button" style="display: inline-block">👋</button>
           <button id="clear-button">🗑️</button>
@@ -81,6 +82,7 @@ class ChatBox extends HTMLElement {
     this.chatHeader = this.shadowRoot.getElementById('chat-header');
     this.chatVideo = this.shadowRoot.getElementById('chat-video');
     this.callButton = this.shadowRoot.getElementById('call-button');
+    this.endCallButton = this.shadowRoot.getElementById('end-call-button');
     this.chatBody = this.shadowRoot.getElementById('chat-body');
     this.chatRoom = this.shadowRoot.getElementById('chat-room');
     this.chatName = this.shadowRoot.getElementById('chat-name');

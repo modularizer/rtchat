@@ -307,26 +307,33 @@ class BaseMQTTRTCClient {
   }
 
   callUser(user, callInfo){
+    let callStartPromise;
     if (callInfo instanceof MediaStream){
         let localStream = callInfo;
-        return this.rtcConnections[user].startCall(localStream).then(remoteStream => {
+        callStartPromise = this.rtcConnections[user].startCall(localStream).then(remoteStream => {
             return {localStream, remoteStream};
         })
-    }
-
-    callInfo = callInfo || {video: true, audio: true}
-    return navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
-        return this.rtcConnections[user].startCall(localStream).then(remoteStream => {
-            return {localStream, remoteStream};
+    }else{
+        callInfo = callInfo || {video: true, audio: true}
+        callStartPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
+            return this.rtcConnections[user].startCall(localStream).then(remoteStream => {
+                return {localStream, remoteStream};
+            });
         });
-    });
+    }
+    let callEndPromise = this.rtcConnections[user].callEndPromise.promise;
+    return {start: callStartPromise, end: callEndPromise};
   }
-  callFromUser(user, callInfo, initiatedCall, promise){
+  endCallWithUser(user){
+    console.log("Ending call with " + user);
+    this.rtcConnections[user].endCall();
+  }
+  callFromUser(user, callInfo, initiatedCall, promises){
     callInfo = callInfo || {video: true, audio: true}
     if (initiatedCall){
         return navigator.mediaDevices.getUserMedia(callInfo)
     }else{
-        return this.acceptCallFromUser(user, callInfo, promise).then(r=> {
+        return this.acceptCallFromUser(user, callInfo, promises).then(r=> {
             if (r){
                 return navigator.mediaDevices.getUserMedia(callInfo)
             }else{
@@ -335,7 +342,10 @@ class BaseMQTTRTCClient {
         })
     }
   }
-  acceptCallFromUser(user, callInfo, promise){
+  oncallended(user){
+    console.log("Call ended with " + user);
+  }
+  acceptCallFromUser(user, callInfo, promises){
      return Promise.resolve(true);
   }
   connectToUser(user){
@@ -473,7 +483,7 @@ class RTCConnection {
         this.onTrack = this.onTrack.bind(this);
         this.sentOffer = false;
 
-        this.streamChannels = ["streamice", "streamoffer", "streamanswer"];
+        this.streamChannels = ["streamice", "streamoffer", "streamanswer", "endcall"];
 
         this.dataChannelDeferredPromises = Object.fromEntries(Object.entries(mqttClient.rtcHandlers).map(([name, handler]) => [name, new DeferredPromise()]));
         this.streamChannels.forEach(channel => this.dataChannelDeferredPromises[channel] = new DeferredPromise());
@@ -500,6 +510,8 @@ class RTCConnection {
         this.initiatedCall = false;
         this.streamConnectionPromise = new DeferredPromise();
         this.streamPromise = new DeferredPromise();
+        this.callEndPromise = new DeferredPromise();
+        this.callPromises = {start: this.streamPromise.promise, end: this.callEndPromise.promise};
     }
     registerDataChannel(dataChannel){
         dataChannel.onmessage = ((e) => {
@@ -537,6 +549,8 @@ class RTCConnection {
                 this.send("streamoffer", JSON.stringify({"offer": this.streamConnection.localDescription, "streamInfo": streamInfo}));
             });
 
+         this.callPromises = {start: this.streamPromise.promise, end: this.callEndPromise.promise};
+
         return this.streamPromise.promise;
     }
     _makeStreamConnection(stream){
@@ -552,6 +566,7 @@ class RTCConnection {
         this.streamConnection.onicecandidate = this.onstreamicecandidate.bind(this);
         this.streamConnection.ontrack = this.onTrack;
         this.streamConnectionPromise.resolve(this.streamConnection);
+        this.callPromises = {start: this.streamPromise.promise, end: this.callEndPromise.promise};
         return this.streamConnection;
     }
     onTrack(event){
@@ -633,6 +648,8 @@ class RTCConnection {
             this.getCall().then(streamConnection => {
                 streamConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(event.data)));
             });
+        }else if (channel === "endcall"){
+            this._closeCall();
         }else{
             this.mqttClient.onrtcmessage(channel, event.data, this.target);
         }
@@ -647,7 +664,7 @@ class RTCConnection {
             return this.streamConnectionPromise.promise;
         }
         this.callRinging = true;
-        return this.mqttClient.callFromUser(this.target, {video: true, audio: true}, this.initiatedCall, this.streamPromise.promise).then(stream => {
+        return this.mqttClient.callFromUser(this.target, {video: true, audio: true}, this.initiatedCall, this.callPromises).then(stream => {
                 if (!this.streamConnection){
                     this.streamConnection = this._makeStreamConnection(stream);
                 }
@@ -656,6 +673,31 @@ class RTCConnection {
                 this.streamConnectionPromise.reject(e);
                 this.streamPromise.reject(e);
             });
+    }
+    endCall(){
+        this.send("endcall", null);
+        this._closeCall();
+    }
+    _closeCall(){
+        if (this.streamConnection){
+            this.streamConnection.close();
+            this.localStream.getTracks().forEach(track => track.stop());
+            this.remoteStream.getTracks().forEach(track => track.stop());
+            this.remoteStream = null;
+            this.localStream = null;
+        }
+        this.callEndPromise.resolve();
+        this.callEndPromise = new DeferredPromise();
+        this.callRinging = false;
+        this.initiatedCall = false;
+        this.streamConnection = null;
+        this.sentstreamice = false;
+        this.streamConnectionPromise = new DeferredPromise();
+        this.streamPromise = new DeferredPromise();
+        this.callEndPromise = new DeferredPromise();
+        this.callPromises = {start: this.streamPromise.promise, end: this.callEndPromise.promise};
+
+        this.mqttClient.oncallended(this.target);
     }
 
     onReceivedIceCandidate(data) {
@@ -1036,6 +1078,8 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
             this.onCallConnectedCallbacks.push(handler.bind(this));
         }else if (rtcevent === "call"){
             this.acceptCallFromUser = handler.bind(this);
+        }else if (rtcevent === "callended"){
+            this.oncallended = handler.bind(this);
         }else{
             this.addQuestionHandler(rtcevent, handler);
         }

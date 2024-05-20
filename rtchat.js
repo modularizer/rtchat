@@ -17,7 +17,8 @@ class RTChat extends ChatBox {
         })
         this.connectRTC = this.connectRTC.bind(this);
         this.connectRTC();
-        this.vc = null;
+        this.vc = new VideoChat(this.rtc);
+        this.calling = null;
     }
     connectRTC() {
         let topic = localStorage.getItem('topic') || 'chat';
@@ -28,17 +29,19 @@ class RTChat extends ChatBox {
         this.rtc.shouldTrust = (peerName) => {return Promise.resolve(true)};
         this.rtc.on('connectionrequest', this.connectionrequest);
         this.incomingCalls = {};
-        this.rtc.on('call', (peerName) => {
+        this.rtc.on('call', (peerName, info, promises) => {
             let msg = `Accept call from ${peerName}`;
+            this.vc.peerName = peerName;
+            this.vc.calling = peerName;
+            promises.end.then((() => {this.vc.close()}).bind(this));
             return this.prompt(`Accept call from ${peerName}`).then(answer => {
-                if (!this.vc) {
-                    this.vc = new VideoChat(this.rtc);
-                    this.chatVideo.appendChild(this.vc);
-                }
-
+                this.chatVideo.appendChild(this.vc);
+                this.callButton.style.display = "none";
+                this.endCallButton.style.display = "block";
                 return answer
             });
         });
+
         this.rtc.on('validation', (peerName, trusted) => {
             if (trusted) {
                 this.notify(`Trusted ${peerName}`);
@@ -46,16 +49,22 @@ class RTChat extends ChatBox {
                 this.notify(`Validated ${peerName}`);
             }
             this.callButton.style.display = "block";
-            this.callButton.onclick = () => {
-                if (!this.vc) {
-                    this.vc = new VideoChat(this.rtc);
-                    this.chatVideo.appendChild(this.vc);
-                }
-                console.warn("Calling", peerName);
-                this.rtc.callUser(peerName);
-            }
+            this.vc.peerName = peerName;
         })
-//        this.callButton.style.display = "block";
+        this.rtc.on('callended', ()=>{
+            this.chatVideo.innerHTML = "";
+            this.callButton.style.display = "block";
+            this.endCallButton.style.display = "none";
+        });
+        this.callButton.onclick = () => {
+            this.callButton.style.display = "none";
+            this.endCallButton.style.display = "block";
+            this.chatVideo.appendChild(this.vc);
+            this.vc.call();
+        }
+        this.endCallButton.onclick = () => {
+            this.vc.endCall();
+        };
         this.rtc.on('validationfailure', (peerName, message) => {
             this.notify(`Validation failed for ${peerName}`);
         });
