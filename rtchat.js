@@ -21,6 +21,7 @@ class RTChat extends ChatBox {
         this.calling = null;
     }
     connectRTC(config) {
+        config = config || {};
         let topic = localStorage.getItem('topic') || 'chat';
         config.topic = config.topic || topic;
         config.trustMode = config.trustMode || 'moderate';
