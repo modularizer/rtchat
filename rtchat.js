@@ -1,5 +1,6 @@
-import { ChatBox } from "./chat.js";
+import { ChatBox } from "./chat-box.js";
 import { SignedMQTTRTCClient } from "./signed-mqtt-rtc.js";
+import { VideoChat } from "./video-chat.js";
 
 
 class RTChat extends ChatBox {
@@ -7,9 +8,7 @@ class RTChat extends ChatBox {
         super();
         this.prompt = this.prompt.bind(this);
         this.notify = this.notify.bind(this);
-        this.shouldConnectToKnownPeer = this.shouldConnectToKnownPeer.bind(this);
-        this.shouldConnectToUnknownPeer = this.shouldConnectToUnknownPeer.bind(this);
-
+        this.connectionrequest = this.connectionrequest.bind(this);
         let topic = localStorage.getItem('topic') || 'chat';
         this.chatRoom.value = topic;
         this.chatRoom.addEventListener('change', () => {
@@ -18,22 +17,45 @@ class RTChat extends ChatBox {
         })
         this.connectRTC = this.connectRTC.bind(this);
         this.connectRTC();
+        this.vc = null;
     }
     connectRTC() {
         let topic = localStorage.getItem('topic') || 'chat';
-        this.rtc = new SignedMQTTRTCClient(null, {}, {}, {
-            topic: topic
+        this.rtc = new SignedMQTTRTCClient({
+            trustMode: 'moderate',
+            config: {topic}
         });
         this.rtc.shouldTrust = (peerName) => {return Promise.resolve(true)};
-        this.rtc.shouldConnectToKnownPeer = this.shouldConnectToKnownPeer.bind(this);
-        this.rtc.shouldConnectToUnknownPeer = this.shouldConnectToUnknownPeer;
+        this.rtc.on('connectionrequest', this.connectionrequest);
+        this.incomingCalls = {};
+        this.rtc.on('call', (peerName) => {
+            let msg = `Accept call from ${peerName}`;
+            return this.prompt(`Accept call from ${peerName}`).then(answer => {
+                if (!this.vc) {
+                    this.vc = new VideoChat(this.rtc);
+                    this.chatVideo.appendChild(this.vc);
+                }
+
+                return answer
+            });
+        });
         this.rtc.on('validation', (peerName, trusted) => {
             if (trusted) {
                 this.notify(`Trusted ${peerName}`);
             } else {
                 this.notify(`Validated ${peerName}`);
             }
+            this.callButton.style.display = "block";
+            this.callButton.onclick = () => {
+                if (!this.vc) {
+                    this.vc = new VideoChat(this.rtc);
+                    this.chatVideo.appendChild(this.vc);
+                }
+                console.warn("Calling", peerName);
+                this.rtc.callUser(peerName);
+            }
         })
+//        this.callButton.style.display = "block";
         this.rtc.on('validationfailure', (peerName, message) => {
             this.notify(`Validation failed for ${peerName}`);
         });
@@ -45,21 +67,14 @@ class RTChat extends ChatBox {
         el.style.fontSize = '0.8em';
         this.messagesEl.appendChild(el);
     }
-    shouldConnectToKnownPeer(peerName, userInfo, peerNames) {
-        let bareName = peerName.split('|')[0].split('(')[0].trim();
-        if (peerNames.includes(bareName)) {
-            let otherNames = peerNames.filter((name) => name !== bareName);
-            let o = (otherNames.length > 1) ? (' (also known as ' + otherNames.join(', ') + ')') : '';
-            this.notify('Connecting to ' + peerName + o);
-            return Promise.resolve(true);
-        }else{
-            let otherNames = peerNames.filter((name) => name !== bareName);
-            let o = (otherNames.length > 1) ? (" who's key matches " + otherNames.join(', ') + ')') : '';
-            return this.prompt(`Do you want to connect to ${peerName}${o}?`);
-        }
-    }
-    shouldConnectToUnknownPeer(peerName) {
-        return this.prompt(`Do you want to connect to ${peerName} (who you have not met)?`);
+
+    connectionrequest(peerName, info) {
+        let {bareName, userInfo, providedPubKey, peerNames, knownPubKey, knownName, otherNamesForPubKey, otherPubKeyForName, completedChallenge,
+        explanation, suspiciousness, category, trustLevel, trustLevelString} = info;
+        console.log("connectionrequest", peerName, trustLevel, trustLevelString, explanation, info);
+
+
+        return this.prompt(`Do you want to connect to ${peerName}${info.hint}?`);
     }
 
     prompt(question) {

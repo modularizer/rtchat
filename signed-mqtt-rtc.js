@@ -220,17 +220,46 @@ class Keys {
     }
 }
 
+let trustLevels = {
+    reject: 0, // do not even connect
+    promptandtrust: 1, // prompt whether to connect and then trust (assuming they pass the challenge)
+    connectandprompt: 2, // connect and then prompt whether to trust
+    connectandtrust: 3 // connect and trust
+}
 
+let suspicionLevels = {
+        trusted: 0,
+        nonsuspicious: 1,
+        slightlyodd: 2,
+        odd: 3,
+        veryodd: 4
+    }
 
 class SignedMQTTRTCClient extends MQTTRTCClient {
-    constructor(name, userInfo, questionHandlers, config, generate=true, load=true) {
-        super(name, userInfo, questionHandlers, config, false);
+    constructor(configuration) {
+        let {name, userInfo, questionHandlers, config, generate, load, trustMode} = configuration || {};
+        if (load === undefined) {load = true;}
+        if (generate === undefined) {generate = true;}
+
+
+        super({name, userInfo, questionHandlers, config, load: false});
         this.keys = new Keys(this.name, generate);
         this.validatedPeers = [];
 
+        if (trustMode === undefined) {trustMode = "strict";}
+        if (this.trustConfigs[trustMode]){
+            this.trustConfig = this.trustConfigs[trustMode];
+        }else{
+            this.trustConfig = trustMode;
+        }
+        if (!this.trustConfig || Object.keys(this.userCategories).map((category) => this.trustConfig[category]).some((level) => level === undefined)){
+            throw new Error("Invalid trust mode");
+        }
+        this.completeUserInfo = {};
+
         this.shouldConnectToUser = this.shouldConnectToUser.bind(this);
-        this.shouldConnectToKnownPeer = this.shouldConnectToKnownPeer.bind(this);
-        this.shouldConnectToUnkownPeer = this.shouldConnectToUnkownPeer.bind(this);
+        this.checkTrust = this.checkTrust.bind(this);
+        this._getFullUserInfo = this._getFullUserInfo.bind(this);
 
         this.trust = this.trust.bind(this);
         this.register = this.register.bind(this);
@@ -256,56 +285,255 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
     verifyUser(channel, data, peerName) {
         console.log("Verifying user", channel, data, peerName);
         if (["question", "answer"].includes(channel) && ["identify", "challenge"].includes(data.question.topic)) {
-            console.log("should be good", data.question.topic)
             return true;
         }
         return this.validatedPeers.includes(peerName);
     }
 
+    _getFullUserInfo(peerName, userInfo) {
+        let _bareName = peerName.split('|')[0].split('(')[0].trim();
+        let providedPubKey = !!userInfo.publicKeyString;
+        let peerNames = providedPubKey?this.keys.getPeerNames(userInfo.publicKeyString):[];
+        let _opk = this.keys.getPublicKeyString(_bareName);
+        let info = {
+            peerName: peerName,
+            bareName: _bareName,
+            userInfo: userInfo,
+            providedPubKey: providedPubKey,
+            knownPubKey: (peerNames.length > 0), // bool of whether the public key is known
+            knownName: peerNames.includes(_bareName), // bool of whether the public key is known under the name provided
+            otherNamesForPubKey: peerNames.filter((name) => name !== _bareName), // array of other names the public key is known under as well (if any)
+            otherPubKeyForName: (_opk && (_opk !== userInfo.publicKeyString)) ? _opk : null, // public key string for the name provided (if different from the public key string provided)
+            completedChallenge: false // bool of whether the challenge has been completed
+        }
+        let category = this.categorizeUser(info);
+        info.explanation = category.explanation;
+        info.suspiciousness = category.suspiciousness;
+        info.category = category.category;
+
+        let hint = '';
+        if (info.category === 'theoneandonly'){
+            hint = '';
+        }else if (['knownwithknownaliases', 'possiblenamechange', 'possiblesharedpubkey'].includes(info.category)){
+            hint = ` who is known as ${otherNamesForPubKey.join(', ')}`;
+        }else if (info.category === 'nameswapcollision'){
+            hint = `it appears ${otherNamesForPubKey[0]} (who you know) is using ${peerName}'s public key to impersonate them'`;
+        }else if (info.category === 'pretender'){
+            hint = ` who is pretending to be ${knownName}`;
+        }else if (info.category === 'nevermet'){
+            hint = ` who you have not met`;
+        }
+        hint = hint? ` (${hint})`: '';
+        info.hint = hint;
+
+        return info
+    }
+
     shouldConnectToUser(peerName, userInfo) {
-        if (!userInfo.publicKeyString) {
-            console.error("No public key for " + peerName);
+        console.log("Should connect to user", peerName, userInfo);
+        let info = this._getFullUserInfo(peerName, userInfo);
+        console.log("info", info)
+        let trustLevel = this.checkTrust(info);
+
+        info.trustLevel = trustLevel;
+        info.trustLevelString = Object.keys(this.trustLevels).find((key) => this.trustLevels[key] === trustLevel);
+
+        if (this.completeUserInfo[peerName]) {
             return Promise.resolve(false);
         }
-        let peerNames = this.keys.getPeerNames(userInfo.publicKeyString);
-        if (peerNames) {
-            return this.shouldConnectToKnownPeer(peerName, userInfo, peerNames);
-        }else {
-            return this.shouldConnectToUnkownPeer(peerName, userInfo);
+        this.completeUserInfo[peerName] = info;
+
+        if (trustLevel === trustLevels.reject) {
+            return Promise.resolve(false);
+        }else if ([trustLevels.doubleprompt, trustLevels.promptandtrust].includes(trustLevel)) {
+            return this.connectionrequest(peerName, info);
+        }else{
+            return Promise.resolve(true);
         }
     }
-    shouldConnectToKnownPeer(peerName, userInfo, peerNames) {
-        return Promise.resolve(true);
+    trustLevels = trustLevels
+    suspicionLevels = suspicionLevels
+    userCategories = {
+        theoneandonly: {knownPubKey: true, knownName: true, otherNamesForPubKey: false, otherPubKeyForName: false,
+            explanation: "you know this person by the public key provided and don't now anyone else by this name or public key",
+            suspiciousness: suspicionLevels.trusted,
+            category: "theoneandonly"
+        },
+        knownwithknownaliases: {knownPubKey: true, knownName: true, otherNamesForPubKey: true, otherPubKeyForName: false,
+            explanation: "you know this person by the public key provided, but you also know them by other names",
+            suspiciousness: suspicionLevels.slightlyodd,
+            category: "knownwithknownaliases"
+        },
+        possiblenamechange: {knownPubKey: true, knownName: false, otherNamesForPubKey: 1, otherPubKeyForName: false,
+            explanation: "you recognize the public key but know it by a different name",
+            suspiciousness: suspicionLevels.slightlyodd,
+            category: "possiblenamechange"
+        },
+        possiblesharedpubkey: {knownPubKey: true, knownName: false, otherNamesForPubKey: true, otherPubKeyForName: false,
+            explanation: "you recognize the public key but know it by more than one other name",
+            suspiciousness: suspicionLevels.slightlyodd,
+            category: "possiblesharedpubkey"
+        },
+        nameswapcollision: {knownPubKey: true, knownName: false, otherNamesForPubKey: true, otherPubKeyForName: true,
+            explanation: "someone you know tried to change their name to the name of someone else you know",
+            suspiciousness: suspicionLevels.odd,
+            category: "nameswapcollision"
+        },
+        //___________________________________________________________________________________
+        pretender: {knownPubKey: false, knownName: false, otherNamesForPubKey: false, otherPubKeyForName: true,
+            explanation: "someone you don't know is using the name of someone you do know",
+            suspiciousness: suspicionLevels.veryodd,
+            category: "pretender"
+        },
+        nevermet: {knownPubKey: false, knownName: false, otherNamesForPubKey: false, otherPubKeyForName: false,
+            explanation: "you don't know anyone with this pub key or name, you probably just haven't met yet",
+            suspiciousness: suspicionLevels.notsuspicious,
+            category: "nevermet"
+        }
     }
-    shouldConnectToUnkownPeer(peerName, userInfo) {
-        return Promise.resolve(false);
+
+
+    trustConfigs = {
+        alwaysprompt: {
+            theoneandonly: trustLevels.promptandtrust,
+            knownwithknownaliases: trustLevels.promptandtrust,
+            possiblenamechange: trustLevels.promptandtrust,
+            possiblesharedpubkey: trustLevels.promptandtrust,
+            nameswapcollision: trustLevels.promptandtrust,
+            pretender: trustLevels.promptandtrust,
+            nevermet: trustLevels.promptandtrust
+        },
+        strict: {
+            theoneandonly: trustLevels.connectandtrust,
+            knownwithknownaliases: trustLevels.promptandtrust,
+            possiblenamechange: trustLevels.promptandtrust,
+            possiblesharedpubkey: trustLevels.promptandtrust,
+            nameswapcollision: trustLevels.promptandtrust,
+            pretender: trustLevels.promptandtrust,
+            nevermet: trustLevels.promptandtrust
+        },
+        strictandquiet: {
+            theoneandonly: trustLevels.connectandtrust,
+            knownwithknownaliases: trustLevels.reject,
+            possiblenamechange: trustLevels.reject,
+            possiblesharedpubkey: trustLevels.reject,
+            nameswapcollision: trustLevels.reject,
+            pretender: trustLevels.reject,
+            nevermet: trustLevels.promptandtrust
+        },
+        moderate: {
+            theoneandonly: trustLevels.connectandtrust,
+            knownwithknownaliases: trustLevels.connectandtrust,
+            possiblenamechange: trustLevels.connectandtrust,
+            possiblesharedpubkey: trustLevels.connectandtrust,
+            nameswapcollision: trustLevels.promptandtrust,
+            pretender: trustLevels.promptandtrust,
+            nevermet: trustLevels.promptandtrust
+        },
+        moderateandquiet: {
+            theoneandonly: trustLevels.connectandtrust,
+            knownwithknownaliases: trustLevels.connectandtrust,
+            possiblenamechange: trustLevels.connectandtrust,
+            possiblesharedpubkey: trustLevels.connectandtrust,
+            nameswapcollision: trustLevels.reject,
+            pretender: trustLevels.reject,
+            nevermet: trustLevels.promptandtrust
+        },
+        unsafe:{
+            theoneandonly: trustLevels.connectandtrust,
+            knownwithknownaliases: trustLevels.connectandtrust,
+            possiblenamechange: trustLevels.connectandtrust,
+            possiblesharedpubkey: trustLevels.connectandtrust,
+            nameswapcollision: trustLevels.connectandtrust,
+            pretender: trustLevels.connectandtrust,
+            nevermet: trustLevels.connectandtrust
+        },
+        rejectall: {
+            theoneandonly: trustLevels.reject,
+            knownwithknownaliases: trustLevels.reject,
+            possiblenamechange: trustLevels.reject,
+            possiblesharedpubkey: trustLevels.reject,
+            nameswapcollision: trustLevels.reject,
+            pretender: trustLevels.reject,
+            nevermet: trustLevels.reject
+        }
+    }
+    categorizeUser(info){
+        if (info.knownPubKey){// we know this pubkey
+            if (info.knownName) { // we know this pubkey by this name (but maybe other names too?)
+                if (info.otherPubKeyForName) {
+                    throw new Error("knownName should mean that this name matches the pubkey so therefore otherPubKeyForName should be null");
+                }else{ // we don't know of any other pubkeys for this name
+                    if (info.otherNamesForPubKey.length === 0) { // we don't know of any other names for this pubkey
+                        return this.userCategories.theoneandonly;
+                    }else{ // we know of other names for this pubkey (and we know this name as well)
+                        return this.userCategories.knownwithknownaliases;
+                    }
+                }
+            }else{ // we know this pubkey but not by this name
+                if (info.otherNamesForPubKey.length === 0) {
+                    throw new Error("knownPubKey should mean that this pubkey matches at least one name so if knownName is false then there should be at least one other name for this pubkey");
+                }else if (info.otherNamesForPubKey.length === 1) { // we know this pubkey by one other name
+                    if (info.otherPubKeyForName) {
+                        return userCategories.nameswapcollision; // we know this pubkey by one other name and we know another pubkey by this name : VERY SUSPICIOUS
+                    }else{
+                        return userCategories.possiblenamechange; // we know this pubkey by one other name and we don't know another pubkey by this name
+                    }
+                }else{// we know this pubkey by more than one other name
+                    if (info.otherPubKeyForName) {
+                        return userCategories.nameswapcollision; // we know this pubkey by more than one other name and we know another pubkey by this name : VERY SUSPICIOUS
+                    }else{
+                        return userCategories.possiblesharedpubkey; // we know this pubkey by more than one other name and we don't know another pubkey by this name
+                    }
+                }
+            }
+        }else{
+            if (info.otherPubKeyForName) {
+                return userCategories.pretender;
+            }else{
+                return userCategories.nevermet;
+            }
+        }
+    }
+
+    checkTrust({peerName, bareName, userInfo, providedPubKey, peerNames, knownPubKey, knownName, otherNamesForPubKey, otherPubKeyForName, completedChallenge,
+        explanation, suspiciousness, category}) {
+        console.log("Checking trust for " + peerName, category, this.trustConfig)
+        return this.trustConfig[category];
+    }
+    connectionrequest(peerName, info) {
+        // prompt whether to connect to a peer
+        let answer = confirm("Do you want to connect to " + peerName + "?");
+        return Promise.resolve(answer);
     }
     trustOrChallenge(peerName) {
         this.keys.getPublicKey(peerName).then((publicKey) => {
             if (!publicKey) {
                 console.log("No public key found for " + peerName);
-                let shouldTrust = this.shouldTrust(peerName);
-                if (shouldTrust instanceof Promise) {
-                    shouldTrust.then((trust) => {
-                        if (trust) {
+                let info = this.completeUserInfo[peerName];
+                let trustLevel = info.trustLevel;
+
+
+                if ([this.trustLevels.reject].includes(trustLevel)) {
+                    console.error("Rejecting connection to " + peerName);
+                    this.untrust(peerName);
+                    return;
+                }else if ([this.trustLevels.connectandprompt].includes(trustLevel)) {
+                    this.connectionrequest(peerName, info).then((connect) => {
+                        if (connect) {
                             this.trust(peerName);
                         }else{
                             this.untrust(peerName);
                         }
                     });
                     return;
-                }else if (shouldTrust) {
+                }else if ([this.trustLevels.promptandtrust, this.trustLevels.connectandtrust].includes(trustLevel)) {
                     this.trust(peerName);
-                }else{
-                    this.untrust(peerName);
                 }
             }else{
                 this.challenge(peerName);
             }
         });
-    }
-    shouldTrust(peerName) {
-        return true;
     }
     _returnPublicKey(challenge, senderName) {
         console.log("Challenge received from " + senderName);
@@ -363,7 +591,9 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         });
     }
     on(event, callback) {
-        if (event === "validation") {
+        if (event === "connectionrequest"){
+            this.connectionrequest = callback;
+        }else if (event === "validation") {
             this.validatedCallbacks.push(callback);
         }else if (event === "validationfailure") {
             this.failedCallbacks.push(callback);

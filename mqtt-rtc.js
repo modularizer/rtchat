@@ -95,8 +95,12 @@ let defaultConfig = {
 
 
 class BaseMQTTRTCClient {
-  constructor(name, userInfo, config, load=true){
+  constructor({name, userInfo, config, load}){
     // specify a tabID to allow multiple tabs to be open at once
+    if (load === undefined){
+        load = true;
+    }
+
     name = name || defaultConfig.name
     if (name.includes("(") || name.includes(")") || name.includes("|")){
         throw new Error("Name cannot contain (, ), or |")
@@ -149,6 +153,11 @@ class BaseMQTTRTCClient {
     this.onrtcdisconnectedFromUser = this.onrtcdisconnectedFromUser.bind(this);
 
     // RTC send/receive methods
+    this.callUser = this.callUser.bind(this);
+    this.callFromUser = this.callFromUser.bind(this);
+    this.acceptCallFromUser = this.acceptCallFromUser.bind(this);
+    this.oncallconnected = this.oncallconnected.bind(this);
+
     this.sendOverRTC = this.sendOverRTC.bind(this);
     this.onrtcmessage = this.onrtcmessage.bind(this);
     this.onrtcerror = this.onrtcerror.bind(this);
@@ -255,14 +264,22 @@ class BaseMQTTRTCClient {
     },
     ro: payload => {//rtc offer
         console.log("received RTCoffer", payload);
-        let {o, t} = payload.data;
-        if (t != this.name){return};
-        if (this.rtcConnections[payload.sender]){
-            console.warn("Already have a connection to " + payload.sender + ". Closing and reopening.")
-            this.rtcConnections[payload.sender].close();
-        }
-        this.rtcConnections[payload.sender] = new RTCConnection(this, payload.sender);
-        this.rtcConnections[payload.sender].respondToOffer(o);
+        this.shouldConnectToUser(payload.sender, payload.data.userInfo).then(r => {
+            if (r){
+                let {o, t} = payload.data.offer;
+                if (t != this.name){return};
+                if (this.rtcConnections[payload.sender]){
+                    console.warn("Already have a connection to " + payload.sender + ". Closing and reopening.")
+                    this.rtcConnections[payload.sender].close();
+                }
+                this.rtcConnections[payload.sender] = new RTCConnection(this, payload.sender);
+                this.rtcConnections[payload.sender].respondToOffer(o);
+            }else{
+                console.warn("Not connecting to " + payload.sender);
+                // TODO: actually reject offer
+            }
+        });
+
     },
     ra: payload => {//rtc answer
         console.log("received RTCanswer", payload);
@@ -287,6 +304,39 @@ class BaseMQTTRTCClient {
   }
   shouldConnectToUser(user, userInfo){
     return Promise.resolve(true);
+  }
+
+  callUser(user, callInfo){
+    if (callInfo instanceof MediaStream){
+        let localStream = callInfo;
+        return this.rtcConnections[user].startCall(localStream).then(remoteStream => {
+            return {localStream, remoteStream};
+        })
+    }
+
+    callInfo = callInfo || {video: true, audio: true}
+    return navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
+        return this.rtcConnections[user].startCall(localStream).then(remoteStream => {
+            return {localStream, remoteStream};
+        });
+    });
+  }
+  callFromUser(user, callInfo, initiatedCall, promise){
+    callInfo = callInfo || {video: true, audio: true}
+    if (initiatedCall){
+        return navigator.mediaDevices.getUserMedia(callInfo)
+    }else{
+        return this.acceptCallFromUser(user, callInfo, promise).then(r=> {
+            if (r){
+                return navigator.mediaDevices.getUserMedia(callInfo)
+            }else{
+                return Promise.reject("Call rejected");
+            }
+        })
+    }
+  }
+  acceptCallFromUser(user, callInfo, promise){
+     return Promise.resolve(true);
   }
   connectToUser(user){
     if (!this.connectionToUser(user)){
@@ -388,6 +438,7 @@ class BaseMQTTRTCClient {
   rtcHandlers = {
     connectedViaRTC: (data, sender) => { this.onConnectedToUser(sender) },
   }
+
   onrtcmessage(channel, data, sender){
     let handler = this.rtcHandlers[channel];
     let deserializedData = data;
@@ -417,7 +468,16 @@ class RTCConnection {
         this.dataChannels = {};
         this.peerConnection = new RTCPeerConnection(this.rtcConfiguration);
         this.peerConnection.onicecandidate = this.onicecandidate.bind(this);
+
+        this.startCall = this.startCall.bind(this);
+        this.onTrack = this.onTrack.bind(this);
+        this.sentOffer = false;
+
+        this.streamChannels = ["streamice", "streamoffer", "streamanswer"];
+
         this.dataChannelDeferredPromises = Object.fromEntries(Object.entries(mqttClient.rtcHandlers).map(([name, handler]) => [name, new DeferredPromise()]));
+        this.streamChannels.forEach(channel => this.dataChannelDeferredPromises[channel] = new DeferredPromise());
+
         this.loadPromise = Promise.all(Object.values(this.dataChannelDeferredPromises).map((deferredPromise) => deferredPromise.promise));
         this.loaded = false;
         this.loadPromise.then((() => {this.loaded = true}).bind(this));
@@ -432,6 +492,14 @@ class RTCConnection {
                 this.mqttClient.onDisconnectedFromUser(this.target);
             }
         }).bind(this);
+
+        this.streamConnection = null;
+        this.remoteStream = null;
+        this.localStream = null;
+        this.sendstreamice = false;
+        this.initiatedCall = false;
+        this.streamConnectionPromise = new DeferredPromise();
+        this.streamPromise = new DeferredPromise();
     }
     registerDataChannel(dataChannel){
         dataChannel.onmessage = ((e) => {
@@ -451,9 +519,51 @@ class RTCConnection {
             let dataChannel = this.peerConnection.createDataChannel(name);
             this.registerDataChannel(dataChannel);
         }
+        this.streamChannels.forEach(channel => {
+            let dataChannel = this.peerConnection.createDataChannel(channel);
+            this.registerDataChannel(dataChannel);
+        });
     }
 
+    startCall(stream){
+        this.initiatedCall = true;
+        let streamInfo = {video: true, audio: true};//TODO: read from stream
+        this.streamConnection = this._makeStreamConnection(stream);
 
+        this.streamConnection.createOffer()
+            .then(offer => this.streamConnection.setLocalDescription(offer))
+            .then(() => {
+                // Send offer via MQTT
+                this.send("streamoffer", JSON.stringify({"offer": this.streamConnection.localDescription, "streamInfo": streamInfo}));
+            });
+
+        return this.streamPromise.promise;
+    }
+    _makeStreamConnection(stream){
+        if (this.streamConnection){
+            console.warn("Already have a stream connection");
+            return;
+        }
+        this.localStream = stream
+        this.streamConnection = new RTCPeerConnection(this.rtcConfiguration);
+
+        stream.getTracks().forEach(track => this.streamConnection.addTrack(track, stream));
+
+        this.streamConnection.onicecandidate = this.onstreamicecandidate.bind(this);
+        this.streamConnection.ontrack = this.onTrack;
+        this.streamConnectionPromise.resolve(this.streamConnection);
+        return this.streamConnection;
+    }
+    onTrack(event){
+        console.warn("Track event", event);
+        this.remoteStream = event.streams[0];
+        let d = {
+            localStream: this.localStream,
+            remoteStream: this.remoteStream
+        }
+        this.streamPromise.resolve(d);
+        this.mqttClient.oncallconnected(this.target, d);
+    }
     sendOffer(){
         this.setupDataChannels();
         this.peerConnection.createOffer()
@@ -461,8 +571,9 @@ class RTCConnection {
           .then(() => {
             // Send offer via MQTT
             console.log("Sending offer to " + this.target);
-            this.mqttClient.postPubliclyToMQTTServer("ro", {"o": this.peerConnection.localDescription, "t": this.target});
+            this.mqttClient.postPubliclyToMQTTServer("ro", {userInfo: this.mqttClient.userInfo, offer: {"o": this.peerConnection.localDescription, "t": this.target}});
           });
+        this.sentOffer = true;
     }
     respondToOffer(offer){
         this.peerConnection.setRemoteDescription(new RTCSessionDescription(offer))
@@ -499,7 +610,52 @@ class RTCConnection {
         dataChannel.send(serializedData);
     }
     onmessage(event, channel){
-        this.mqttClient.onrtcmessage(channel, event.data, this.target);
+        if (channel === "streamoffer"){
+            console.log("received stream offer", event.data)
+            let {offer, streamInfo} = JSON.parse(event.data);
+            this.getCall().then(streamConnection => {
+                streamConnection.setRemoteDescription(new RTCSessionDescription(offer))
+                    .then(() => this.streamConnection.createAnswer())
+                    .then(answer => this.streamConnection.setLocalDescription(answer))
+                    .then(() => {
+                        // Send answer via MQTT
+                        console.log("Sending stream answer", this.streamConnection.localDescription);
+                        this.send("streamanswer", JSON.stringify({"answer": this.streamConnection.localDescription}));
+                    });
+            });
+
+        }else if (channel === "streamanswer"){
+            console.log("received stream answer", event.data)
+            let {answer} = JSON.parse(event.data);
+            this.streamConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        }else if (channel === "streamice"){
+            console.log("received stream ice", event.data)
+            this.getCall().then(streamConnection => {
+                streamConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(event.data)));
+            });
+        }else{
+            this.mqttClient.onrtcmessage(channel, event.data, this.target);
+        }
+    }
+
+    getCall(){
+        console.log("Getting call", this.streamConnection, this.streamConnectionPromise);
+        if (this.streamConnection){
+            return Promise.resolve(this.streamConnection);
+        }
+        if (this.callRinging){
+            return this.streamConnectionPromise.promise;
+        }
+        this.callRinging = true;
+        return this.mqttClient.callFromUser(this.target, {video: true, audio: true}, this.initiatedCall, this.streamPromise.promise).then(stream => {
+                if (!this.streamConnection){
+                    this.streamConnection = this._makeStreamConnection(stream);
+                }
+                return this.streamConnection;
+            }).catch(e => {
+                this.streamConnectionPromise.reject(e);
+                this.streamPromise.reject(e);
+            });
     }
 
     onReceivedIceCandidate(data) {
@@ -510,6 +666,14 @@ class RTCConnection {
         if (event.candidate) {
             // Send ICE candidate via MQTT
             this.mqttClient.postPubliclyToMQTTServer("ri", event.candidate);
+        }
+    }
+    onstreamicecandidate(event){
+        if (event.candidate && !this.sentstreamice) {
+            this.sentstreamice = true;
+            // Send ICE candidate via RTC
+            console.log("Sending stream ice", this, event.candidate);
+            this.send("streamice", JSON.stringify(event.candidate));
         }
     }
     ondatachannel(event){
@@ -532,9 +696,14 @@ class RTCConnection {
 
 
 class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
-  constructor(name, userInfo, questionHandlers, config, load=true){
+    constructor({name, userInfo, questionHandlers, config, load}){
+    if (load === undefined){
+        load = true;
+    }
+
     // initialize state tracking variables
-    super(name, userInfo, config, false);
+    super({name, userInfo, config, load: false});
+
     Object.assign(this.rtcHandlers, this.extraRTCHandlers);
     for (let [k, v] of Object.entries(this.rtcHandlers)){
         this.rtcHandlers[k] = v.bind(this);
@@ -812,15 +981,20 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
     console.log("Received pong from " + sender);
   }
 
+
+
 }
 
 class MQTTRTCClient extends PromisefulMQTTRTCClient {
-    constructor(name, userInfo, questionHandlers, config, load=true){
+    constructor({name, userInfo, questionHandlers, config, load}){
         // this.knownUsers = {name: userInfo, ...} of all users, even those we're not connected to
         // this.rtcConnections = {name: rtcConnection, ...} of active connections
         // this.connectedUsers = [name, ...] of all users we're connected to
+        if (load === undefined){
+            load = true;
+        }
 
-        super(name, userInfo, questionHandlers, config, false);
+        super({name, userInfo, questionHandlers, config, load: false});
         this.onConnectedCallbacks = [];
         this.onDisconnectedCallbacks = [];
         this.onNameChangeCallbacks = [];
@@ -830,6 +1004,7 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         this.onRTCQuestionCallbacks = [];
         this.onRTCAnswerCallbacks = [];
         this.onMQTTMessageCallbacks = [];
+        this.onCallConnectedCallbacks = [];
 
         if (load){
             this.load();
@@ -857,6 +1032,10 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
             this.receivedPingCallbacks.push(handler.bind(this));
         }else if (rtcevent === "mqtt"){
             this.onMQTTMessageCallbacks.push(handler.bind(this));
+        }else if (rtcevent === "callconnected"){
+            this.onCallConnectedCallbacks.push(handler.bind(this));
+        }else if (rtcevent === "call"){
+            this.acceptCallFromUser = handler.bind(this);
         }else{
             this.addQuestionHandler(rtcevent, handler);
         }
@@ -892,6 +1071,10 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
     }
     addQuestionHandler(name, handler){
         super.addQuestionHandler(name, handler);
+    }
+    oncallconnected(sender, {localStream, remoteStream}){
+        console.warn("call connected", sender, localStream, remoteStream);
+        this.onCallConnectedCallbacks.forEach(h => h(sender, {localStream, remoteStream}));
     }
 
     pingEveryone(){
