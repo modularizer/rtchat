@@ -315,11 +315,11 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         if (info.category === 'theoneandonly'){
             hint = '';
         }else if (['knownwithknownaliases', 'possiblenamechange', 'possiblesharedpubkey'].includes(info.category)){
-            hint = ` who is known as ${otherNamesForPubKey.join(', ')}`;
+            hint = ` who is known as ${info.otherNamesForPubKey.join(', ')}`;
         }else if (info.category === 'nameswapcollision'){
-            hint = `it appears ${otherNamesForPubKey[0]} (who you know) is using ${peerName}'s public key to impersonate them'`;
+            hint = `it appears ${info.otherNamesForPubKey[0]} (who you know) is using ${peerName}'s public key to impersonate them'`;
         }else if (info.category === 'pretender'){
-            hint = ` who is pretending to be ${otherNamesForPubKey[0]}`;
+            hint = ` who is pretending to be ${info.otherNamesForPubKey[0]}`;
         }else if (info.category === 'nevermet'){
             hint = ` who you have not met`;
         }
