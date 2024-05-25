@@ -532,6 +532,7 @@ class RTCConnection {
             }
         }).bind(this);
 
+        this.pendingStreamIceCandidate = null;
         this.streamConnection = null;
         this.remoteStream = null;
         this.localStream = null;
@@ -657,7 +658,15 @@ class RTCConnection {
         if (channel === "streamoffer"){
             console.log("received stream offer", event.data)
             let {offer, streamInfo} = JSON.parse(event.data);
-            this.getCall().then(streamConnection => {
+            this.mqttClient.callFromUser(this.target, {video: true, audio: true}, this.initiatedCall, this.callPromises).then(stream => {
+                if (!this.streamConnection){
+                    this.streamConnection = this._makeStreamConnection(stream);
+                }
+                return this.streamConnection;
+            }).catch(e => {
+                this.streamConnectionPromise.reject(e);
+                this.streamPromise.reject(e);
+            }).then(streamConnection => {
                 streamConnection.setRemoteDescription(new RTCSessionDescription(offer))
                     .then(() => this.streamConnection.createAnswer())
                     .then(answer => this.streamConnection.setLocalDescription(answer))
@@ -665,6 +674,11 @@ class RTCConnection {
                         // Send answer via MQTT
                         console.log("Sending stream answer", this.streamConnection.localDescription);
                         this.send("streamanswer", JSON.stringify({"answer": this.streamConnection.localDescription}));
+                        if (this.pendingStreamIceCandidate){
+                            console.log("Found pending stream ice candidate");
+                            this.streamConnection.addIceCandidate(new RTCIceCandidate(this.pendingStreamIceCandidate));
+                            this.pendingStreamIceCandidate = null;
+                        }
                     });
             });
 
@@ -674,34 +688,16 @@ class RTCConnection {
             this.streamConnection.setRemoteDescription(new RTCSessionDescription(answer));
         }else if (channel === "streamice"){
             console.log("received stream ice", event.data)
-            this.getCall().then(streamConnection => {
-                streamConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(event.data)));
-            });
+            if (this.streamConnection){
+                this.streamConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(event.data)));
+            }else{
+                this.pendingStreamIceCandidate = JSON.parse(event.data);
+            }
         }else if (channel === "endcall"){
             this._closeCall();
         }else{
             this.mqttClient.onrtcmessage(channel, event.data, this.target);
         }
-    }
-
-    getCall(){
-        console.log("Getting call", this.streamConnection, this.streamConnectionPromise);
-        if (this.streamConnection){
-            return Promise.resolve(this.streamConnection);
-        }
-        if (this.callRinging){
-            return this.streamConnectionPromise.promise;
-        }
-        this.callRinging = true;
-        return this.mqttClient.callFromUser(this.target, {video: true, audio: true}, this.initiatedCall, this.callPromises).then(stream => {
-                if (!this.streamConnection){
-                    this.streamConnection = this._makeStreamConnection(stream);
-                }
-                return this.streamConnection;
-            }).catch(e => {
-                this.streamConnectionPromise.reject(e);
-                this.streamPromise.reject(e);
-            });
     }
     endCall(){
         this.send("endcall", null);
@@ -721,6 +717,7 @@ class RTCConnection {
         this.initiatedCall = false;
         this.streamConnection = null;
         this.sentstreamice = false;
+        this.pendingStreamIceCandidate = null;
         this.streamConnectionPromise = new DeferredPromise();
         this.streamPromise = new DeferredPromise();
         this.callEndPromise = new DeferredPromise();
