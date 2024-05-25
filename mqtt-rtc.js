@@ -165,6 +165,7 @@ class BaseMQTTRTCClient {
 
 
     this.mqttHistory = [];
+    this.maxHistoryLength = 1000;
 
     // load the MQTT client
     if (load){
@@ -220,6 +221,9 @@ class BaseMQTTRTCClient {
             payload.sent = false;
             payload.receiveTimestamp = Date.now();
             this.mqttHistory.push(payload);
+            while (this.mqttHistory.length > this.maxHistoryLength){
+                this.mqttHistory.shift();
+            }
             console.log("Received MQTT message on " + this.topic  + " subtopic " + subtopic + " from " + payload.sender, payload.data);
             if (this.mqttHandlers[subtopic]){
                 this.mqttHandlers[subtopic](payload);
@@ -252,6 +256,9 @@ class BaseMQTTRTCClient {
     this.client.publish(this.topic, payloadString);
     payload.sent = true;
     this.mqttHistory.push(payload);
+    while (this.mqttHistory.length > this.maxHistoryLength){
+        this.mqttHistory.shift();
+    }
   }
 
   //____________________________________________________________________________________________________________________
