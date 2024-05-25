@@ -83,7 +83,7 @@ let defaultConfig = {
     broker: 'wss://public:public@public.cloud.shiftr.io',
     stunServer: "stun:stun4.l.google.com:19302",
     baseTopic: "mrtchat",
-    topic: (["localhost", "127.0.0.1", "modularizer.github.io"].includes(location.hostname)?"":location.hostname) + location.pathname.replace("rtchat/","").replace("index.html", "").replace(".html", "").replace(/[^a-zA-Z0-9]/g, "") + location.hash.replace("#", "").replace(/[^a-zA-Z0-9]/g, ""),
+    topic: (["localhost", "127.0.0.1", "modularizer.github.io"].includes(location.hostname)?"":location.hostname) + location.pathname.replace("rtchat/","").replace("index.html", "").replace(".html", "").replace(/[^a-zA-Z0-9]/g, ""),
     name: name,
 }
 
