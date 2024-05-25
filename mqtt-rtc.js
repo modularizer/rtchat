@@ -93,7 +93,9 @@ let defaultConfig = {
 
 
 class BaseMQTTRTCClient {
-  constructor({name, userInfo, config, load}){
+  constructor(config){
+    config = config || {};
+    let {name, userInfo, load, baseTopic, topic, broker, stunServer} = config;
     // specify a tabID to allow multiple tabs to be open at once
     if (load === undefined){
         load = true;
@@ -112,8 +114,6 @@ class BaseMQTTRTCClient {
     }
     this.name = name + (tabID?('(' + tabID + ')'):''); // add the tab ID to the name
     this.userInfo = userInfo || {};
-
-    let {baseTopic, topic, broker, stunServer} = config || {};
 
     this.mqttBroker = broker || defaultConfig.broker;
     this.stunServer = stunServer || defaultConfig.stunServer;
@@ -768,13 +768,16 @@ class RTCConnection {
 
 
 class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
-    constructor({name, userInfo, questionHandlers, handlers, config, load}){
+    constructor(config){
+    config = config || {};
+    let {name, userInfo, questionHandlers, handlers, load} = config;
     if (load === undefined){
         load = true;
     }
 
+    config.load = false;
     // initialize state tracking variables
-    super({name, userInfo, config, load: false});
+    super(config);
 
     Object.assign(this.rtcHandlers, this.extraRTCHandlers);
     Object.assign(this.rtcHandlers, handlers || {});
@@ -1059,15 +1062,17 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
 }
 
 class MQTTRTCClient extends PromisefulMQTTRTCClient {
-    constructor({name, userInfo, questionHandlers, handlers, config, load}){
+    constructor(config){
+        config = config || {};
+        let {name, userInfo, questionHandlers, handlers, load} = config;
         // this.knownUsers = {name: userInfo, ...} of all users, even those we're not connected to
         // this.rtcConnections = {name: rtcConnection, ...} of active connections
         // this.connectedUsers = [name, ...] of all users we're connected to
         if (load === undefined){
             load = true;
         }
-
-        super({name, userInfo, questionHandlers, config, load: false});
+        config.load = false;
+        super(config);
         this.onConnectedCallbacks = [];
         this.onDisconnectedCallbacks = [];
         this.onNameChangeCallbacks = [];
