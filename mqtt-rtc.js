@@ -3,28 +3,23 @@
 // find the id of all the tabs open
 let existingTabs = JSON.parse(localStorage.getItem('tabs') || '[]');
 
-console.log("Existing tabs initial load: ", existingTabs);
 let timeNow = Date.now();
 for (let existingTabID of existingTabs){
     let ts = localStorage.getItem("tabpoll_" + existingTabID);
     if (ts){
         let lastUpdateTime = new Date(1 * ts);
         if ((lastUpdateTime == "Invalid Date") || ((timeNow - lastUpdateTime) > 300)){
-            console.log("removing tab", existingTabID, lastUpdateTime, (timeNow - lastUpdateTime))
             localStorage.removeItem("tabpoll_" + existingTabID);
             existingTabs = existingTabs.filter(v=>v!==existingTabID);
             localStorage.setItem('tabs', JSON.stringify(existingTabs));
         }
     }else{
-        console.warn("No timestamp found for tab " + existingTabID);
         localStorage.removeItem("tabpoll_" + existingTabID);
         existingTabs = existingTabs.filter(v=>v!==existingTabID);
         localStorage.setItem('tabs', JSON.stringify(existingTabs));
     }
 }
 existingTabs = JSON.parse(localStorage.getItem('tabs') || '[]');
-
-console.log("Existing tabs filtered: ", existingTabs);
 
 let maxTabID = existingTabs.length?(Math.max(...existingTabs)):-1;
 let minTabID = existingTabs.length?(Math.min(...existingTabs)):-1;
@@ -78,6 +73,9 @@ if (n && n.startsWith("anon")){
     n = null;
 }
 let name = n || ("anon" + Math.floor(Math.random() * 1000));
+if (name.startsWith("anon")){
+    name = prompt("Enter your name");
+}
 
 
 //______________________________________________________ CONFIGURATION _________________________________________________
@@ -117,9 +115,6 @@ class BaseMQTTRTCClient {
 
     let {baseTopic, topic, broker, stunServer} = config || {};
 
-    console.log("Config: ", config, topic);
-
-
     this.mqttBroker = broker || defaultConfig.broker;
     this.stunServer = stunServer || defaultConfig.stunServer;
     this.baseTopic = baseTopic || defaultConfig.baseTopic;
@@ -157,6 +152,7 @@ class BaseMQTTRTCClient {
     this.callFromUser = this.callFromUser.bind(this);
     this.acceptCallFromUser = this.acceptCallFromUser.bind(this);
     this.oncallconnected = this.oncallconnected.bind(this);
+    this.isConnectedToUser = this.isConnectedToUser.bind(this);
 
     this.sendOverRTC = this.sendOverRTC.bind(this);
     this.onrtcmessage = this.onrtcmessage.bind(this);
@@ -165,17 +161,31 @@ class BaseMQTTRTCClient {
     // initialize state tracking variables
     this.rtcConnections = {};
     this.knownUsers = {};
+    this.pendingIceCandidates = {};
+
+
+    this.mqttHistory = [];
 
     // load the MQTT client
     if (load){
         this.load();
+    }
+    if (window.rtc){
+        let old = window.rtc;
+        console.warn("RTC already exists. Saving old RTC object to window.rtc.old,", old);
+        let oldName = old.name;
+        window.rtc = {
+            oldName: old,
+            name: this
+        }
+    }else{
+        window.rtc = this;
     }
   }
   //________________________________________________________ MQTT BASICS _______________________________________________
   load(){
     if (!window.mqtt){
         // if the MQTT library isn't loaded yet byt the script tag in HTML, try again in 100ms
-        console.warn("MQTT not loaded yet");
         setTimeout(this.load.bind(this), 100);
         return;
     }
@@ -188,7 +198,7 @@ class BaseMQTTRTCClient {
   }
   _onMQTTConnect(){
     this.client.subscribe(this.topic);
-    this.postPubliclyToMQTTServer("c", this.userInfo);
+    this.postPubliclyToMQTTServer("connect", this.userInfo);
     this.onConnectedToMQTT();
   }
     onConnectedToMQTT(){
@@ -203,16 +213,14 @@ class BaseMQTTRTCClient {
             }catch(e){
                 payload = JSON.parse(payloadString)
             }
-            payload = {
-                sender: payload.s,
-                timestamp: payload.n,
-                subtopic: payload.t,
-                data: payload.d
-            }
             if (payload.sender === this.name){
                 return;
             }
             let subtopic = payload.subtopic;
+            payload.sent = false;
+            payload.receiveTimestamp = Date.now();
+            this.mqttHistory.push(payload);
+            console.log("Received MQTT message on " + this.topic  + " subtopic " + subtopic + " from " + payload.sender, payload.data);
             if (this.mqttHandlers[subtopic]){
                 this.mqttHandlers[subtopic](payload);
             }else{
@@ -225,14 +233,14 @@ class BaseMQTTRTCClient {
     console.log("Received message from " + sender + " on " + subtopic, data);
   }
   beforeunload(){
-    this.postPubliclyToMQTTServer("bu", "disconnecting");
+    this.postPubliclyToMQTTServer("unload", "disconnecting");
   }
   postPubliclyToMQTTServer(subtopic, data){
     let payload = {
-        s: this.name,
-        n: Date.now(),
-        t: subtopic,
-        d: data || message
+        sender: this.name,
+        timestamp: Date.now(),
+        subtopic: subtopic,
+        data: data || message
     }
     let payloadString = JSON.stringify(payload);
     let originalLength = payloadString.length;
@@ -240,13 +248,15 @@ class BaseMQTTRTCClient {
         let compressed = LZString.compressToUint8Array(payloadString);
         payloadString = compressed;
     }
-    console.log("Sending message to " + this.topic + " on " + subtopic, data);
+    console.log("Sending message to " + this.topic + " subtopic " + subtopic, data);
     this.client.publish(this.topic, payloadString);
+    payload.sent = true;
+    this.mqttHistory.push(payload);
   }
 
   //____________________________________________________________________________________________________________________
   mqttHandlers = {
-    c: payload => {//connection
+    connect: payload => {//connection
         console.log("Received notice that someone else connected:" + payload.sender, payload, payload.data);
         this.knownUsers[payload.sender] = payload.data;
         this.shouldConnectToUser(payload.sender, payload.data).then(r => {
@@ -255,25 +265,29 @@ class BaseMQTTRTCClient {
             }
         })
     },
-    nc: payload => {//name
+    nameChange: payload => {//name
         this.recordNameChange(data.oldName, data.newName);
     },
-    bu: payload => {
+    unload: payload => {
         this.disconnectFromUser(payload.sender);
         delete this.knownUsers[payload.sender];
     },
-    ro: payload => {//rtc offer
-        console.log("received RTCoffer", payload);
+    RTCOffer: payload => {//rtc offer
         this.shouldConnectToUser(payload.sender, payload.data.userInfo).then(r => {
             if (r){
-                let {o, t} = payload.data.offer;
-                if (t != this.name){return};
+                if (payload.data.offer.target != this.name){return};
                 if (this.rtcConnections[payload.sender]){
                     console.warn("Already have a connection to " + payload.sender + ". Closing and reopening.")
                     this.rtcConnections[payload.sender].close();
                 }
                 this.rtcConnections[payload.sender] = new RTCConnection(this, payload.sender);
-                this.rtcConnections[payload.sender].respondToOffer(o);
+                this.rtcConnections[payload.sender].respondToOffer(payload.data.offer.localDescription);
+                let pendingIceCandidate = this.pendingIceCandidates[payload.sender];
+                if (pendingIceCandidate){
+                    console.log("Found pending ice candidate for " + payload.sender);
+                    this.rtcConnections[payload.sender].onReceivedIceCandidate(pendingIceCandidate);
+                    delete this.pendingIceCandidates[payload.sender];
+                }
             }else{
                 console.warn("Not connecting to " + payload.sender);
                 // TODO: actually reject offer
@@ -281,25 +295,26 @@ class BaseMQTTRTCClient {
         });
 
     },
-    ra: payload => {//rtc answer
-        console.log("received RTCanswer", payload);
-        let {a, t} = payload.data;
-        if (t != this.name){return};
+
+    RTCIceCandidate: payload => {//rtc ice candidate
+        let rtcConnection = this.rtcConnections[payload.sender]; // Using the correct connection
+        if (!rtcConnection){
+//            console.error("No connection found for " + payload.sender);
+            this.pendingIceCandidates[payload.sender] = payload.data;
+//            rtcConnection = new RTCConnection(this, payload.sender);
+//            this.rtcConnections[payload.sender] = rtcConnection
+        }else{
+            rtcConnection.onReceivedIceCandidate(payload.data);
+        }
+    },
+    RTCAnswer: payload => {//rtc answer
+        if (payload.data.target != this.name){return};
         let rtcConnection = this.rtcConnections[payload.sender]; // Using the correct connection
         if (!rtcConnection){
             console.error("No connection found for " + payload.sender);
             return
         }
-        rtcConnection.receiveAnswer(a);
-    },
-    ri: payload => {//rtc ice candidate
-        let rtcConnection = this.rtcConnections[payload.sender]; // Using the correct connection
-        if (!rtcConnection){
-            console.error("No connection found for " + payload.sender);
-            rtcConnection = new RTCConnection(this, payload.sender);
-            this.rtcConnections[payload.sender] = rtcConnection
-        }
-        rtcConnection.onReceivedIceCandidate(payload.data);
+        rtcConnection.receiveAnswer(payload.data.localDescription);
     }
   }
   shouldConnectToUser(user, userInfo){
@@ -392,6 +407,9 @@ class BaseMQTTRTCClient {
   }
   onConnectedToUser(user){
     console.log("Connected to user ", user);
+  }
+  isConnectedToUser(user){
+    return this.rtcConnections[user] && this.rtcConnections[user].peerConnection.connectionState === "connected";
   }
   onrtcdisconnectedFromUser(user){
     if (!this.rtcConnections[user]){
@@ -590,7 +608,7 @@ class RTCConnection {
           .then(() => {
             // Send offer via MQTT
             console.log("Sending offer to " + this.target);
-            this.mqttClient.postPubliclyToMQTTServer("ro", {userInfo: this.mqttClient.userInfo, offer: {"o": this.peerConnection.localDescription, "t": this.target}});
+            this.mqttClient.postPubliclyToMQTTServer("RTCOffer", {userInfo: this.mqttClient.userInfo, offer: {"localDescription": this.peerConnection.localDescription, "target": this.target}});
           });
         this.sentOffer = true;
     }
@@ -600,9 +618,9 @@ class RTCConnection {
               .then(answer => this.peerConnection.setLocalDescription(answer))
               .then((answer) => {
                 // Send answer via MQTT
-                this.mqttClient.postPubliclyToMQTTServer("ra", {
-                    "a": this.peerConnection.localDescription,
-                    "t": this.target,
+                this.mqttClient.postPubliclyToMQTTServer("RTCAnswer", {
+                    "localDescription": this.peerConnection.localDescription,
+                    "target": this.target,
                 });
               });
     }
@@ -712,7 +730,7 @@ class RTCConnection {
         if (event.candidate && !this.sentice) {
             this.sentice = true;
             // Send ICE candidate via MQTT
-            this.mqttClient.postPubliclyToMQTTServer("ri", event.candidate);
+            this.mqttClient.postPubliclyToMQTTServer("RTCIceCandidate", event.candidate);
         }
     }
     onstreamicecandidate(event){

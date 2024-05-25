@@ -65,3 +65,52 @@ client.on("answer", (answer, sender) => {
 
 
 
+# How it works
+## Get an identity
+1. When the page loads, the client make sure it has a name to call itself
+   i. figures out a unique tab id for this specific tab open to this page domain by checking local storage
+      a. reads tab id list from local storage
+      b. filters the tab id list to those which have phoned into local storage recently and set the local time as a sort of "keep-alive"
+      c. uses a tab id not in the list, sets localStorage, and sets up an interval to keep the tab id alive
+   ii. loads name from local storage if it exists, otherwise it prompts the user for a name
+   iii. saves the name to local storage
+   iv. name + tab_id becomes the "name" of the client
+2. Make a topic from the page url, along with the "room" if applicable. This is how we'll find other people to talk to
+3. Make a private/public key pair if you don't already have one
+   i. loads the public key from local storage if it exists, otherwise it generates a new key pair
+   ii. saves the public key to local storage
+
+## Connect to the room
+1. The client connects to the public mqtt broker at a topic dictated by the page url
+2. The client subscribes to the topic and listens for all messages from anyone on the same topic (any tabs open to this url). We use "subtopics" just encoded in the message payload.
+
+## Use the public mqtt broker and a public stun server to help establish WebRTC connections with other clients
+1. post a public MQTT message of your public key to the subtopic "connect"
+   i. this actually means the payload `'{subtopic: connect, sender: <name>, timestamp: <Date.now()>, data: {publicKeyString: 'asdfasd'}'` is sent to the topic every page user is connected to
+2. each client receives your name and public key on that "connect" message and decides whether it wants to try to talk to you
+   i. NOTE: we don't implement the public key challenge yet over mqtt. we semi-trust the info for now and once we finalize a secure connection the first thing we do is challenge the other person to prove they are who they say they are
+3. if a client wants to talk to you, 
+    i. it establishes a new RTCPeerConnection configured to talk to a public stun server
+    ii. it uses this stun server to get its public IP address, port, and other info your browser will need to talk directly to its browser
+    iii. it puts this identifying info into an RTCOffer and sends it to the public mqtt topic for the page with the subtopic "RTCOffer", along with its own name and public key and your name so you know it is for you
+4. when you receive an RTCOffer, you create an RTCOffer, use the name and public key to decide if you want to talk to this person
+  i. NOTE: we don't implement the public key challenge yet over mqtt. we semi-trust the info for now and once we finalize a secure connection the first thing we do is challenge the other person to prove they are who they say they are
+5. if you want to talk to this person...
+    i. you establish a new RTCPeerConnection configured to talk to a public stun server
+    ii. you use this stun server to get your public IP address, port, and other info the other person's browser will need to talk directly to your browser
+    iii. you put this identifying info into an RTCAnswer and send it to the public mqtt topic for the page with the subtopic "RTCAnswer"
+6. when the other person receives your RTCAnswer, they use the info to establish a direct connection to your browser
+7. now the two browsers can talk directly to each other using WebRTC!
+
+## Validate Who You're Talking To
+1. as soon as the WebRTC connection is established, the two clients exchange a challenge / response to verify they each have the private key that corresponds to the public key they sent over mqtt
+2. if the challenge / response is successful, the two clients can trust that they are talking to the person they think they are talking to
+3. if the challenge / response is unsuccessful, the connection gets closed
+
+## Send Messages
+1. now there is a secure serverless connection between the two clients and it has been validated with cryptography keys and encrypted end-to-end
+
+
+
+
+

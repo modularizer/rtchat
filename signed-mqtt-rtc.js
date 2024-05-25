@@ -257,7 +257,6 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         }else{
             this.trustConfig = trustMode;
         }
-        console.warn("Trust mode", trustMode, this.trustConfig);
         if (!this.trustConfig || Object.keys(this.userCategories).map((category) => this.trustConfig[category]).some((level) => level === undefined)){
             throw new Error("Invalid trust mode");
         }
@@ -353,7 +352,7 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
     }
 
     shouldConnectToUser(peerName, userInfo) {
-        console.log("Should connect to user", peerName, userInfo);
+        console.log("Checking if we should connect to user", peerName, userInfo);
         let info = this._getFullUserInfo(peerName, userInfo);
         console.log("info", info)
         let trustLevel = this.checkTrust(info);
@@ -361,16 +360,26 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         info.trustLevel = trustLevel;
         info.trustLevelString = Object.keys(this.trustLevels).find((key) => this.trustLevels[key] === trustLevel);
 
-        if (this.completeUserInfo[peerName]) {
+        if (this.completeUserInfo[peerName] && this.isConnectedToUser(peerName)) {
+            console.warn("Rejecting connection to " + peerName + " because we are already connected to someone with that name");
             return Promise.resolve(false);
         }
         this.completeUserInfo[peerName] = info;
 
         if (trustLevel === trustLevels.reject) {
+            console.error("Rejecting connection to " + peerName);
             return Promise.resolve(false);
         }else if ([trustLevels.doubleprompt, trustLevels.promptandtrust].includes(trustLevel)) {
-            return this.connectionrequest(peerName, info);
+            return this.connectionrequest(peerName, info).then((connect) => {
+                if (connect) {
+                    console.log("Decided to connect to " + peerName);
+                }else{
+                    console.log("Decided not to connect to " + peerName);
+                }
+                return connect;
+            }, (e)=> {console.log("Error in connection request", e); return false});
         }else{
+            console.log("will connect to " + peerName);
             return Promise.resolve(true);
         }
     }
