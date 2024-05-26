@@ -1,10 +1,10 @@
 import { ChatBox } from "./chat-box.js";
 import { SignedMQTTRTCClient } from "./signed-mqtt-rtc.js";
-import { VideoChat } from "./video-chat.js";
+import { BasicVideoChat } from "./video-chat.js";
 
 
 class RTChat extends ChatBox {
-    constructor(config) {
+    constructor(config, VC = BasicVideoChat) {
         super();
         config = config || {};
 
@@ -22,8 +22,11 @@ class RTChat extends ChatBox {
         })
         this.connectRTC = this.connectRTC.bind(this);
         this.connectRTC(config);
-        this.vc = new VideoChat(this.rtc);
-        this.calling = null;
+        this.vc = new VC(this.rtc);
+        this.vc.hide();
+        this.chatVideo.appendChild(this.vc);
+        this.lastValidated = "";
+
     }
     connectRTC(config) {
         config = config || {};
@@ -35,12 +38,7 @@ class RTChat extends ChatBox {
         this.rtc.on('connectionrequest', this.connectionrequest);
         this.incomingCalls = {};
         this.rtc.on('call', (peerName, info, promises) => {
-            let msg = `Accept call from ${peerName}`;
-            this.vc.peerName = peerName;
-            this.vc.calling = peerName;
-            promises.end.then((() => {this.vc.close()}).bind(this));
             return this.prompt(`Accept call from ${peerName}`).then(answer => {
-                this.chatVideo.appendChild(this.vc);
                 this.callButton.style.display = "none";
                 this.endCallButton.style.display = "block";
                 return answer
@@ -54,18 +52,19 @@ class RTChat extends ChatBox {
                 this.notify(`Validated ${peerName}`);
             }
             this.callButton.style.display = "block";
-            this.vc.peerName = peerName;
+            //set help text to show the last validated peer
+            this.lastValidated = peerName;
+            this.callButton.title = `Call ${this.lastValidated}`;
+
         })
         this.rtc.on('callended', ()=>{
-            this.chatVideo.innerHTML = "";
             this.callButton.style.display = "block";
             this.endCallButton.style.display = "none";
         });
         this.callButton.onclick = () => {
             this.callButton.style.display = "none";
             this.endCallButton.style.display = "block";
-            this.chatVideo.appendChild(this.vc);
-            this.vc.call();
+            this.vc.call(this.lastValidated);
         }
         this.endCallButton.onclick = () => {
             this.vc.endCall();
@@ -126,4 +125,4 @@ if (['t','true','yes','y','1'].includes((new URL(import.meta.url).searchParams.g
     });
 }
 
-export { RTChat, SignedMQTTRTCClient, VideoChat };
+export { RTChat, SignedMQTTRTCClient, BasicVideoChat };
