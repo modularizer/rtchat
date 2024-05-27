@@ -277,7 +277,7 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         this.on('identify', this._returnPublicKey.bind(this));
         this.on('challenge', this._sign.bind(this));
         this.on('connectedtopeer', (peerName)=>{
-            setTimeout(()=> {this.trustOrChallenge.bind(this)(peerName)}, 500);
+            setTimeout(()=> {this.trustOrChallenge.bind(this)(peerName)}, 1000);
         });
 
         if (load) {
