@@ -318,14 +318,16 @@ class BaseMQTTRTCClient {
     },
 
     RTCIceCandidate: payload => {//rtc ice candidate
-        let rtcConnection = this.rtcConnections[payload.sender]; // Using the correct connection
-        if (!rtcConnection){
-//            console.error("No connection found for " + payload.sender);
-            this.pendingIceCandidates[payload.sender] = payload.data;
-//            rtcConnection = new RTCConnection(this, payload.sender);
-//            this.rtcConnections[payload.sender] = rtcConnection
-        }else{
-            rtcConnection.onReceivedIceCandidate(payload.data);
+        if (payload.data){
+            let rtcConnection = this.rtcConnections[payload.sender]; // Using the correct connection
+            if (!rtcConnection){
+    //            console.error("No connection found for " + payload.sender);
+                this.pendingIceCandidates[payload.sender] = payload.data;
+    //            rtcConnection = new RTCConnection(this, payload.sender);
+    //            this.rtcConnections[payload.sender] = rtcConnection
+            }else{
+                rtcConnection.onReceivedIceCandidate(payload.data);
+            }
         }
     },
     RTCAnswer: payload => {//rtc answer
