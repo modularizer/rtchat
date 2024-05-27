@@ -517,7 +517,6 @@ class RTCConnection {
         this.dataChannels = {};
         this.peerConnection = new RTCPeerConnection(this.rtcConfiguration);
         this.peerConnection.onicecandidate = this.onicecandidate.bind(this);
-        this.sentice=false;
 
         this.startCall = this.startCall.bind(this);
         this.onTrack = this.onTrack.bind(this);
@@ -742,11 +741,11 @@ class RTCConnection {
     }
 
     onicecandidate(event){
-        if (event.candidate && !this.sentice) {
-            this.sentice = true;
+//        if (event.candidate && !this.sentice) {
+//            this.sentice = true;
             // Send ICE candidate via MQTT
             this.mqttClient.postPubliclyToMQTTServer("RTCIceCandidate", event.candidate);
-        }
+//        }
     }
     onstreamicecandidate(event){
         if (event.candidate && !this.sentstreamice) {
