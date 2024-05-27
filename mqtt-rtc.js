@@ -198,9 +198,14 @@ class BaseMQTTRTCClient {
     window.addEventListener("beforeunload", this.beforeunload.bind(this));
   }
   _onMQTTConnect(){
-    this.client.subscribe(this.topic);
-    this.postPubliclyToMQTTServer("connect", this.userInfo);
-    this.onConnectedToMQTT();
+    this.client.subscribe(this.topic, ((err)=>{
+    if (!err) {
+        this.postPubliclyToMQTTServer("connect", this.userInfo);
+        this.onConnectedToMQTT();
+
+    }).bind(this));
+
+
   }
     onConnectedToMQTT(){
         console.log("Connected to MQTT: " + this.topic + " as " + this.name);
