@@ -200,9 +200,13 @@ class BaseMQTTRTCClient {
   _onMQTTConnect(){
     this.client.subscribe(this.topic, ((err)=>{
     if (!err) {
+        console.log("subscribed to ", this.topic);
         this.postPubliclyToMQTTServer("connect", this.userInfo);
         this.onConnectedToMQTT();
 
+    }else {
+        console.error("Error subscribing to " + this.topic, err);
+    }
     }).bind(this));
 
 
