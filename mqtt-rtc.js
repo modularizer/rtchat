@@ -265,6 +265,10 @@ class BaseMQTTRTCClient {
   mqttHandlers = {
     connect: payload => {//connection
         console.log("Received notice that someone else connected:" + payload.sender, payload, payload.data);
+        if (this.rtcConnections[payload.sender]){
+            console.warn("Disconnect " + payload.sender);
+            this.disconnectFromUser(payload.sender);
+        }
         this.knownUsers[payload.sender] = payload.data;
         this.shouldConnectToUser(payload.sender, payload.data).then(r => {
             if (r){
