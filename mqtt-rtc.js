@@ -244,7 +244,7 @@ class BaseMQTTRTCClient {
         sender: this.name,
         timestamp: Date.now(),
         subtopic: subtopic,
-        data: data || message
+        data: data
     }
     let payloadString = JSON.stringify(payload);
     let originalLength = payloadString.length;
