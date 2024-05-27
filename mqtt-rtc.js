@@ -364,7 +364,9 @@ class BaseMQTTRTCClient {
   }
   endCallWithUser(user){
     console.log("Ending call with " + user);
-    this.rtcConnections[user].endCall();
+    if (this.rtcConnections[user]){
+        this.rtcConnections[user].endCall();
+    }
   }
   callFromUser(user, callInfo, initiatedCall, promises){
     callInfo = callInfo || {video: true, audio: true}
@@ -714,10 +716,12 @@ class RTCConnection {
             this.streamConnection.setRemoteDescription(new RTCSessionDescription(answer));
         }else if (channel === "streamice"){
             console.log("received stream ice", event.data)
-            if (this.streamConnection){
-                this.streamConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(event.data)));
-            }else{
-                this.pendingStreamIceCandidate = JSON.parse(event.data);
+            if (event.data){
+                if (this.streamConnection){
+                    this.streamConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(event.data)));
+                }else{
+                    this.pendingStreamIceCandidate = JSON.parse(event.data);
+                }
             }
         }else if (channel === "endcall"){
             this._closeCall();
@@ -742,7 +746,6 @@ class RTCConnection {
         this.callRinging = false;
         this.initiatedCall = false;
         this.streamConnection = null;
-        this.sentstreamice = false;
         this.pendingStreamIceCandidate = null;
         this.streamConnectionPromise = new DeferredPromise();
         this.streamPromise = new DeferredPromise();
@@ -764,8 +767,7 @@ class RTCConnection {
 //        }
     }
     onstreamicecandidate(event){
-        if (event.candidate && !this.sentstreamice) {
-            this.sentstreamice = true;
+        if (event.candidate) {
             // Send ICE candidate via RTC
             console.log("Sending stream ice", this, event.candidate);
             this.send("streamice", JSON.stringify(event.candidate));
