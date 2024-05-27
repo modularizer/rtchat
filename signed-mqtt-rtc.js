@@ -241,13 +241,13 @@ let suspicionLevels = {
     }
 
 class SignedMQTTRTCClient extends MQTTRTCClient {
-    constructor(configuration) {
-        let {name, userInfo, questionHandlers, handlers, topic, generate, load, trustMode} = configuration || {};
+    constructor(config) {
+        let {name, userInfo, questionHandlers, handlers, topic, generate, load, trustMode} = config || {};
         if (load === undefined) {load = true;}
         if (generate === undefined) {generate = true;}
 
-
-        super({name, userInfo, questionHandlers, handlers, configuration, load: false});
+        config.load = false;
+        super(config);
         this.keys = new Keys(this.name, generate);
         this.validatedPeers = [];
 
