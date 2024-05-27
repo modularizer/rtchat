@@ -959,7 +959,7 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
 
  //__________________________________________________ RTC ______________________________________________________________
   onConnectedToUser(user){
-    console.log("Connected to user ", user, this.connectedUsers, this.rtcConnections);
+    console.log("Connected to user ", user);
     this.nextUserConnection.resolve(user);
     this.nextUserConnection = new DeferredPromise();
   }
@@ -1034,7 +1034,6 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
   }
   onRTCQuestion(data, sender){
     let {n, question} = data;
-    console.log("Received question from " + sender, data);
     let answer = this.respondToQuestion(question, sender);
     if (answer instanceof Promise){
         answer.then((a) => {
@@ -1167,18 +1166,15 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         this.onDisconnectedCallbacks.forEach(h => h(user));
     }
     onRTCDM(data, sender){
-        console.log("Received DM from " + sender, data);
         this.onDMCallbacks.forEach(h => h(data, sender));
     }
     onRTCChat(data, sender){
-        console.log("Received chat from " + sender, data);
         this.onChatCallbacks.forEach(h => h(data, sender));
     }
     addQuestionHandler(name, handler){
         super.addQuestionHandler(name, handler);
     }
     oncallconnected(sender, {localStream, remoteStream}){
-        console.warn("call connected", sender, localStream, remoteStream);
         this.onCallConnectedCallbacks.forEach(h => h(sender, {localStream, remoteStream}));
     }
 
@@ -1196,7 +1192,6 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         });
     }
     receivedPing(sender){
-        console.log("Received ping from " + sender);
         this.receivedPingCallbacks.forEach(h => h(sender));
     }
 
