@@ -371,6 +371,13 @@ class BaseMQTTRTCClient {
      return Promise.resolve(true);
   }
   connectToUser(user){
+    if (this.rtcConnections[user]){
+        console.warn("Already connected to " + user);
+        try{
+            this.disconnectFromUser(user);
+        }catch{}
+        delete this.rtcConnections[user];
+    }
     if (!this.connectionToUser(user)){
         this.rtcConnections[user] = new RTCConnection(this, user);
         this.rtcConnections[user].sendOffer();
@@ -383,10 +390,14 @@ class BaseMQTTRTCClient {
         return existingConnection
     }else if (existingConnection){
         console.warn("Already have a connection to " + user + " but it's not connected.", existingConnection.peerConnection.connectionState);
+        if (existingConnection.peerConnection.connectionState == "failed"){
+            console.warn("Connection failed. Closing and reopening.");
+            this.disconnectFromUser(user);
+            return null;
+        }
+
+
         return existingConnection;
-//        console.warn("Already have a connection to " + user + " but it's not connected.", existingConnection.peerConnection.connectionState,"  Closing and reopening.");
-//        this.disconnectFromUser(user);
-//        return null;
 
     }
     return null;
