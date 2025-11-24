@@ -18,6 +18,12 @@ RTChat is a **cross-platform, framework-agnostic** peer-to-peer communication li
 npm install @rtchat/core
 ```
 
+## Documentation
+
+- **[Custom UI Guide](./CUSTOM_UI_GUIDE.md)** - Complete guide for building your own chat UI
+- **[RTC Protocol Guide](./RTC_GUIDE.md)** - RTC channels, handlers, methods, and extending the protocol
+- Core API documentation in source files (JSDoc comments)
+
 ## Quick Start
 
 ### npm Package (Recommended)

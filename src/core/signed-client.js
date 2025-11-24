@@ -89,48 +89,20 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
     constructor(userConfig) {
         userConfig = userConfig || {};
         
-        // Extract config values - support both new RTCConfig and legacy format
-        let config, generate, load, trustMode, name;
-        
-        // Check if userConfig is an RTCConfig instance
-        const isRTCConfig = userConfig instanceof RTCConfig;
-        
-        if (isRTCConfig) {
-            config = userConfig;
-            const configObj = config.getConfig();
-            generate = userConfig.generate !== false;
-            load = configObj.load !== false;
-            trustMode = userConfig.trustMode || configObj.trustMode || "strict";
-            name = config.name;
-        } else {
-            // Try to create RTCConfig from userConfig, or use legacy
-            try {
-                config = new RTCConfig(userConfig);
-                const configObj = config.getConfig();
-                generate = userConfig.generate !== false;
-                load = configObj.load !== false;
-                trustMode = userConfig.trustMode || configObj.trustMode || "strict";
-                name = config.name;
-            } catch (e) {
-                // Fall back to legacy if RTCConfig creation fails
-                config = userConfig;
-                generate = userConfig.generate !== false;
-                load = userConfig.load !== false;
-                trustMode = userConfig.trustMode || "strict";
-                name = userConfig.name;
-            }
-        }
+        // Extract config values
+        const config = userConfig instanceof RTCConfig ? userConfig : new RTCConfig(userConfig);
+        const configObj = config.getConfig();
+        const generate = userConfig.generate !== false;
+        const load = configObj.load !== false;
+        const trustMode = userConfig.trustMode || configObj.trustMode || "strict";
+        const name = config.name;
+        const autoAcceptConnections = configObj.connection?.autoAcceptConnections ?? false;
 
         // Prepare config for parent (don't pass load flag, we'll handle it)
-        const parentConfig = (config instanceof RTCConfig) ? 
-            config : 
-            { ...userConfig, load: false };
-        super(parentConfig);
+        super({ ...userConfig, load: false });
         
         // Get name from config or use the one we extracted
-        if (!name) {
-            name = this.name ? this.name.split('(')[0] : (userConfig.name || 'User');
-        }
+        const finalName = name || (this.name ? this.name.split('(')[0] : 'User');
         
         // Initialize keys with storage adapter and crypto from config
         const storage = this.storage || (typeof localStorage !== 'undefined' ? {
@@ -139,11 +111,10 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
           removeItem: (key) => localStorage.removeItem(key)
         } : null);
         
-        // Get crypto from config or fall back to window.crypto
-        const configObj = config instanceof RTCConfig ? config.getConfig() : {};
+        // Get crypto from config
         const crypto = configObj.crypto || (typeof window !== 'undefined' && window.crypto ? window.crypto : null);
         
-        this.keys = new Keys(name, generate, { storage, crypto });
+        this.keys = new Keys(finalName, generate, { storage, crypto });
         this.validatedPeers = [];
 
         // Set up trust configuration
@@ -166,13 +137,12 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         this.register = this.register.bind(this);
         this.challenge = this.challenge.bind(this);
         this.untrust = this.untrust.bind(this);
+        
+        // Store auto-accept setting
+        this.autoAcceptConnections = autoAcceptConnections;
 
-        // Legacy callbacks - kept for backward compatibility, now also use EventEmitter
-        this.validatedCallbacks = [];
-        this.failedCallbacks = [];
-
-        this.on('identify', this._returnPublicKey.bind(this));
-        this.on('challenge', this._sign.bind(this));
+        this.addQuestionHandler('identify', this._returnPublicKey.bind(this));
+        this.addQuestionHandler('challenge', this._sign.bind(this));
         this.on('connectedtopeer', (peerName)=>{
             setTimeout(()=> {this.trustOrChallenge.bind(this)(peerName)}, 1000);
         });
@@ -440,7 +410,14 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         return this.trustConfig[category];
     }
     connectionrequest(peerName, info) {
-        // prompt whether to connect to a peer
+        // If auto-accept is enabled, automatically accept
+        if (this.autoAcceptConnections) {
+            console.log("Auto-accepting connection request from", peerName);
+            return Promise.resolve(true);
+        }
+        
+        // Otherwise, prompt whether to connect to a peer
+        // This can be overridden by listening to the 'connectionrequest' event
         let answer = confirm("Do you want to connect to " + peerName + "?");
         return Promise.resolve(answer);
     }
@@ -449,8 +426,17 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
             if (!publicKey) {
                 console.log("No public key found for " + peerName);
                 let info = this.completeUserInfo[peerName];
-                let trustLevel = info.trustLevel;
-
+                
+                // If info doesn't exist, create it with default values
+                if (!info) {
+                    info = this._getFullUserInfo(peerName, {});
+                    const trustLevel = this.checkTrust(info);
+                    info.trustLevel = trustLevel;
+                    info.trustLevelString = Object.keys(this.trustLevels).find((key) => this.trustLevels[key] === trustLevel);
+                    this.completeUserInfo[peerName] = info;
+                }
+                
+                const trustLevel = info.trustLevel;
 
                 if ([this.trustLevels.reject].includes(trustLevel)) {
                     console.error("Rejecting connection to " + peerName);
@@ -491,12 +477,26 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         let challengeString = this.keys.getChallengeString();
         return this.sendRTCQuestion("identify", challengeString, peerName).then(({publicKeyString, signature}) => {
              if (oldPublicKeyString && (oldPublicKeyString !== publicKeyString)) {
-                console.error("Public key already exists for " + peerName, oldPublicKeyString, publicKeyString);
-                throw new Error("Public key already exists for " + peerName);
+                console.error("Public key changed for " + peerName, oldPublicKeyString, publicKeyString);
+                throw new Error("Public key changed for " + peerName);
             }
             return this.keys.verify(publicKeyString, signature, challengeString).then((valid) => {
                 if (valid) {
                     console.log("Signature valid for " + peerName + ", trusting and saving public key");
+                    // Check if this public key is already registered to a different name
+                    const existingPeers = this.keys.getPeerNames(publicKeyString);
+                    if (existingPeers.length > 0 && !existingPeers.includes(peerName)) {
+                        // Public key is registered to a different name - update the mapping
+                        console.log("Public key already registered to", existingPeers, "updating to", peerName);
+                        // Remove old name mappings
+                        existingPeers.forEach(oldName => {
+                            delete this.keys._knownHostsStrings[oldName];
+                        });
+                        // Update storage after removing old mappings
+                        if (this.keys.storage) {
+                            this.keys.storage.setItem("knownHostsStrings", JSON.stringify(this.keys._knownHostsStrings));
+                        }
+                    }
                     this.keys.savePublicKeyString(peerName, publicKeyString);
                     this.onValidatedPeer(peerName, true);
                     this.validatedPeers.push(peerName);
@@ -534,18 +534,7 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
     on(event, callback) {
         if (event === "connectionrequest"){
             this.connectionrequest = callback;
-            // Also register as event listener
             return super.on(event, callback);
-        }else if (event === "validation") {
-            const boundCallback = callback.bind(this);
-            this.validatedCallbacks.push(boundCallback);
-            // Also use EventEmitter
-            return super.on(event, boundCallback);
-        }else if (event === "validationfailure") {
-            const boundCallback = callback.bind(this);
-            this.failedCallbacks.push(boundCallback);
-            // Also use EventEmitter
-            return super.on(event, boundCallback);
         }else{
             return super.on(event, callback);
         }
@@ -556,17 +545,11 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
             console.log("Trusting peer " + peerName + " is who they say they are.");
         }
         console.log("Peer " + peerName + " validated");
-        // Emit event (EventEmitter)
         this.emit('validation', peerName, trusting);
-        // Also call legacy callbacks for backward compatibility
-        this.validatedCallbacks.forEach((cb) => cb(peerName, trusting));
     }
     onValidationFailed(peerName, message) {
         console.error("Peer " + peerName + " validation failed" + (message ? ": " + message : ""));
-        // Emit event (EventEmitter)
         this.emit('validationfailure', peerName, message);
-        // Also call legacy callbacks for backward compatibility
-        this.failedCallbacks.forEach((cb) => cb(peerName, message));
     }
     untrust(peerName) {
         /* remove a public key from a peer */

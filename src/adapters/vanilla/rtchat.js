@@ -28,8 +28,10 @@
  * 
  * Configuration:
  *   const chat = new RTChat({
- *     showRoomInput: true,  // Show/hide room input field
- *     topic: 'myroom',      // Chat room name
+ *     showRoom: true,        // Show/hide room name in header (default: true)
+ *     allowRoomChange: true, // Allow editing room name (default: true)
+ *     showRoomInput: true,   // Show/hide legacy room input field
+ *     topic: 'myroom',       // Chat room name
  *     trustMode: 'moderate' // Trust level: 'strict', 'moderate', 'lax', 'unsafe', etc.
  *   });
  * 
@@ -58,6 +60,16 @@ class RTChat extends ChatBox {
     constructor(config, VC = BasicVideoChat) {
         super();
         config = config || {};
+        
+        // Check for auto-config from URL parameters (when ?add=true)
+        if (this._autoConfig) {
+            config = { ...config, ...this._autoConfig };
+            delete this._autoConfig;
+        }
+
+        // Configure room display and editability
+        this.showRoom = config.showRoom !== false; // Default: true
+        this.allowRoomChange = config.allowRoomChange !== false; // Default: true
 
         if (!config.showRoomInput){
             this.chatRoomBox.style.display = "none";
@@ -65,12 +77,26 @@ class RTChat extends ChatBox {
         this.prompt = this.prompt.bind(this);
         this.notify = this.notify.bind(this);
         this.connectionrequest = this.connectionrequest.bind(this);
-        let topic = localStorage.getItem('topic') || 'chat';
+        this._activeConnectionPrompts = new Map(); // Track active prompts by peer name
+        // Use defaultRoom from config if provided, otherwise localStorage, otherwise 'chat'
+        let topic = config.topic || localStorage.getItem('topic') || 'chat';
+        // If topic is an object, extract the room
+        if (typeof topic === 'object' && topic.room) {
+            topic = topic.room;
+        }
         this.chatRoom.value = topic;
         this.chatRoom.addEventListener('change', () => {
             localStorage.setItem('topic', this.chatRoom.value);
             this.connectRTC(config);
         })
+        
+        // Listen for room change events from ChatBox
+        this.addEventListener('roomchange', (e) => {
+            const newRoom = e.detail.room;
+            localStorage.setItem('topic', newRoom);
+            this.connectRTC(config);
+        });
+        
         this.connectRTC = this.connectRTC.bind(this);
         this.connectRTC(config);
         this.vc = new VC(this.rtc);
@@ -81,8 +107,18 @@ class RTChat extends ChatBox {
     }
     connectRTC(config) {
         config = config || {};
-        let topic = localStorage.getItem('topic') || 'chat';
-        config.topic = config.topic || topic;
+        // Use topic from config if provided, otherwise localStorage, otherwise 'chat'
+        let topic = config.topic || localStorage.getItem('topic') || 'chat';
+        // If topic is an object, extract the room
+        if (typeof topic === 'object' && topic.room) {
+            topic = topic.room;
+        }
+        // Use new nested config format
+        if (!config.topic || typeof config.topic === 'string') {
+            config.topic = { room: config.topic || topic };
+        } else if (!config.topic.room) {
+            config.topic.room = topic;
+        }
         config.trustMode = config.trustMode || 'moderate';
         this.rtc = new SignedMQTTRTCClient(config);
         this.rtc.shouldTrust = (peerName) => {return Promise.resolve(true)};
@@ -137,31 +173,121 @@ class RTChat extends ChatBox {
         explanation, suspiciousness, category, trustLevel, trustLevelString} = info;
         console.log("connectionrequest", peerName, trustLevel, trustLevelString, explanation, info);
 
+        // Check localStorage for auto-accept setting
+        const autoAcceptEnabled = localStorage.getItem('rtchat_autoAccept') === 'true';
+        if (autoAcceptEnabled) {
+            console.log("Auto-accepting connection request from", peerName);
+            return Promise.resolve(true);
+        }
 
-        return this.prompt(`Do you want to connect to ${peerName}${info.hint}?`);
+        // Remove existing prompt for this peer if it exists
+        if (this._activeConnectionPrompts.has(peerName)) {
+            const existingPrompt = this._activeConnectionPrompts.get(peerName);
+            if (existingPrompt && existingPrompt.element && existingPrompt.element.parentNode) {
+                existingPrompt.element.remove();
+            }
+            // Reject the old promise
+            if (existingPrompt && existingPrompt.reject) {
+                existingPrompt.reject(new Error('Replaced by new connection request'));
+            }
+            this._activeConnectionPrompts.delete(peerName);
+        }
+
+        // Ensure hint is defined (default to empty string if not set)
+        const hint = info.hint || '';
+        const promptText = `Do you want to connect to ${peerName}${hint}?`;
+        
+        // Create a new promise for this prompt
+        let promptResolve, promptReject;
+        const promptPromise = new Promise((resolve, reject) => {
+            promptResolve = resolve;
+            promptReject = reject;
+        });
+        
+        // Show the prompt with three options and get the element
+        const promptResult = this.prompt(promptText, true); // true = show auto-accept option
+        const promptElement = promptResult.element;
+        
+        // Track this prompt
+        this._activeConnectionPrompts.set(peerName, {
+            element: promptElement,
+            resolve: promptResolve,
+            reject: promptReject
+        });
+        
+        // When user responds, clean up
+        promptResult.promise.then((result) => {
+            this._activeConnectionPrompts.delete(peerName);
+            promptResolve(result);
+        }).catch((error) => {
+            this._activeConnectionPrompts.delete(peerName);
+            promptReject(error);
+        });
+        
+        return promptPromise;
     }
 
-    prompt(question) {
-        let promise = new Promise((resolve, reject) => {
-            let el = document.createElement('div');
-            el.innerHTML = question;
-            let yes = document.createElement('button');
-            yes.innerHTML = "Yes";
-            yes.onclick = () => {
-                el.remove();
-                resolve(true);
-            };
-            let no = document.createElement('button');
-            no.innerHTML = "No";
-            no.onclick = () => {
-                el.remove();
-                reject();
-            };
-            el.appendChild(yes);
-            el.appendChild(no);
-            this.messagesEl.appendChild(el);
+    prompt(question, showAutoAccept = false) {
+        let el = document.createElement('div');
+        el.style.marginBottom = '10px';
+        
+        // Question text
+        let questionEl = document.createElement('div');
+        questionEl.innerHTML = question;
+        questionEl.style.marginBottom = '8px';
+        el.appendChild(questionEl);
+        
+        // Button container (on separate row)
+        let buttonContainer = document.createElement('div');
+        buttonContainer.style.display = 'flex';
+        buttonContainer.style.gap = '8px';
+        buttonContainer.style.flexWrap = 'wrap';
+        
+        let yes = document.createElement('button');
+        yes.innerHTML = "Yes";
+        let no = document.createElement('button');
+        no.innerHTML = "No";
+        
+        buttonContainer.appendChild(yes);
+        buttonContainer.appendChild(no);
+        
+        // Create promise first, then attach handlers
+        let resolveFn, rejectFn;
+        const promise = new Promise((resolve, reject) => {
+            resolveFn = resolve;
+            rejectFn = reject;
         });
-        return promise;
+        
+        yes.onclick = () => {
+            el.remove();
+            resolveFn(true);
+        };
+        no.onclick = () => {
+            el.remove();
+            rejectFn();
+        };
+        
+        // Add auto-accept option if requested
+        if (showAutoAccept) {
+            let autoAccept = document.createElement('button');
+            autoAccept.innerHTML = "Auto-accept everyone";
+            autoAccept.onclick = () => {
+                // Store preference in localStorage
+                localStorage.setItem('rtchat_autoAccept', 'true');
+                el.remove();
+                resolveFn(true);
+            };
+            buttonContainer.appendChild(autoAccept);
+        }
+        
+        el.appendChild(buttonContainer);
+        this.messagesEl.appendChild(el);
+        
+        // Return both the promise and the element for tracking
+        return {
+            promise: promise,
+            element: el
+        };
     }
 }
 
@@ -172,7 +298,36 @@ customElements.define('rtc-hat', RTChat);
 
 if (['t','true','yes','y','1'].includes((new URL(import.meta.url).searchParams.get('add') || "").toLowerCase())) {
     window.addEventListener('load', () => {
-        document.body.appendChild(document.createElement('rtc-hat'));
+        const urlParams = new URL(import.meta.url).searchParams;
+        
+        // Parse search parameters
+        const config = {};
+        
+        // showRoom: default true, set to false if 'false', '0', 'no', etc.
+        const showRoomParam = urlParams.get('showRoom');
+        if (showRoomParam !== null) {
+            config.showRoom = !['false', '0', 'no', 'n', 'f'].includes(showRoomParam.toLowerCase());
+        }
+        
+        // editableRoom (allowRoomChange): default true, set to false if 'false', '0', 'no', etc.
+        const editableRoomParam = urlParams.get('editableRoom');
+        if (editableRoomParam !== null) {
+            config.allowRoomChange = !['false', '0', 'no', 'n', 'f'].includes(editableRoomParam.toLowerCase());
+        }
+        
+        // defaultRoom: set the initial room/topic
+        const defaultRoomParam = urlParams.get('defaultRoom');
+        if (defaultRoomParam !== null) {
+            config.topic = defaultRoomParam;
+        }
+        
+        const chatElement = document.createElement('rtc-hat');
+        // Apply config if any parameters were provided
+        if (Object.keys(config).length > 0) {
+            // Store config in element for RTChat constructor to read
+            chatElement._autoConfig = config;
+        }
+        document.body.appendChild(chatElement);
     });
 }
 

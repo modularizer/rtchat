@@ -204,6 +204,16 @@ export class Keys {
     peerName = peerName.split("|")[0].split("(")[0].trim();
     let matchingPeers = this.getPeerNames(publicKeyString);
     if (matchingPeers.length > 0) {
+      // If the public key is already registered to this peer name, allow updating
+      if (matchingPeers.includes(peerName)) {
+        // Same peer, same key - no change needed, but update anyway to be safe
+        this._knownHostsStrings[peerName] = publicKeyString;
+        if (this.storage) {
+          this.storage.setItem("knownHostsStrings", JSON.stringify(this._knownHostsStrings));
+        }
+        return true;
+      }
+      // Public key is registered to a different peer name
       console.error("Public key already registered for another peer", matchingPeers);
       throw new Error("Public key already registered for another peer");
     }

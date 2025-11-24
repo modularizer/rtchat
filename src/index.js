@@ -1,7 +1,7 @@
 /**
  * Main entry point for RTChat
  * 
- * Exports all public APIs and maintains backward compatibility
+ * Exports all public APIs
  */
 
 // Export new refactored modules
@@ -21,7 +21,6 @@ export {
   PromisefulMQTTRTCClient,
   RTCConnection,
   Peer,
-  DeferredPromise as DeferredPromiseLegacy,
   tabID,
   defaultConfig
 } from './core/mqtt-rtc-client.js';

@@ -258,7 +258,16 @@ export function getDefaults() {
        * - Maximum time to wait for initial connection
        * - Throws error if not connected within this time
        */
-      connectionTimeout: 30000
+      connectionTimeout: 30000,
+      
+      /**
+       * Automatically accept all peer connection requests
+       * - If true, bypasses connection prompts and accepts all requests
+       * - Only applies to SignedMQTTRTCClient (MQTTRTCClient always auto-accepts)
+       * - When false, prompts user based on trust levels
+       * - Useful for testing, public demos, or trusted environments
+       */
+      autoAcceptConnections: false
     },
     
     // ============================================================================
@@ -335,11 +344,11 @@ export function getDefaults() {
     logger: null,
     
     // ============================================================================
-    // BACKWARD COMPATIBILITY
+    // CONNECTION LOADING
     // ============================================================================
     
     /**
-     * Auto-load flag (for backward compatibility)
+     * Auto-load flag
      * - If false, client won't automatically connect
      * - Must call client.load() manually
      * - Default: true (auto-connect)

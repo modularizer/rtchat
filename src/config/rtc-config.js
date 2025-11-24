@@ -2,7 +2,7 @@
  * RTCConfig - Configuration management for RTChat
  * 
  * Centralized configuration system with validation, normalization, and presets.
- * Supports both new nested format and backward-compatible flat format.
+ * Uses nested configuration format with validation and presets.
  */
 
 import { getDefaults } from './defaults.js';
@@ -15,7 +15,7 @@ export class RTCConfig {
   }
   
   constructor(userConfig = {}) {
-    // Normalize user config (handle backward compatibility)
+    // Normalize user config (handle common string formats)
     const normalized = this.normalizeUserConfig(userConfig);
     
     // Get defaults from separate file and merge with user config
@@ -30,6 +30,17 @@ export class RTCConfig {
     
     // Normalize values (e.g., convert single STUN to array)
     this.normalize();
+  }
+  
+  normalizeUserConfig(userConfig) {
+    const normalized = { ...userConfig };
+    
+    // Handle topic as string -> topic.room
+    if (typeof userConfig.topic === 'string') {
+      normalized.topic = { room: userConfig.topic };
+    }
+    
+    return normalized;
   }
   
   applyComputedDefaults() {
@@ -50,54 +61,6 @@ export class RTCConfig {
       // User explicitly wants to use defaults, copy from defaults
       this.config.webrtc.iceServers = [...getDefaults().webrtc.iceServers];
     }
-  }
-  
-  normalizeUserConfig(userConfig) {
-    // Convert old flat format to new nested format for backward compatibility
-    const normalized = { ...userConfig };
-    
-    // Handle old flat format: broker -> mqtt.broker
-    if (userConfig.broker && !userConfig.mqtt) {
-      normalized.mqtt = { broker: userConfig.broker };
-      delete normalized.broker;
-    }
-    
-    // Handle old flat format: stunServer -> webrtc.iceServers
-    if (userConfig.stunServer && !userConfig.webrtc && !userConfig.iceServers) {
-      normalized.webrtc = { iceServers: userConfig.stunServer };
-      delete normalized.stunServer;
-    }
-    
-    // Handle old flat format: iceServers at top level -> webrtc.iceServers
-    if (userConfig.iceServers && !userConfig.webrtc) {
-      normalized.webrtc = { iceServers: userConfig.iceServers };
-      delete normalized.iceServers;
-    }
-    
-    // Handle old flat format: baseTopic -> topic.base
-    if (userConfig.baseTopic && !userConfig.topic) {
-      normalized.topic = { base: userConfig.baseTopic };
-      delete normalized.baseTopic;
-    }
-    
-    // Handle old flat format: topic as string -> topic.room
-    if (typeof userConfig.topic === 'string' && !userConfig.topic?.room) {
-      normalized.topic = { room: userConfig.topic };
-    }
-    
-    // Handle old flat format: autoConnect, autoReconnect at top level
-    if (userConfig.autoConnect !== undefined && !userConfig.connection) {
-      normalized.connection = { autoConnect: userConfig.autoConnect };
-      delete normalized.autoConnect;
-    }
-    
-    if (userConfig.autoReconnect !== undefined && !userConfig.connection) {
-      if (!normalized.connection) normalized.connection = {};
-      normalized.connection.autoReconnect = userConfig.autoReconnect;
-      delete normalized.autoReconnect;
-    }
-    
-    return normalized;
   }
   
   getDefaultName() {
@@ -203,14 +166,6 @@ export class RTCConfig {
   }
   get baseTopic() { return this.config.topic.base; }
   get room() { return this.config.topic.room; }
-  get stunServer() { 
-    // Backward compatibility - return first STUN server
-    const stun = this.config.webrtc.iceServers.find(s => 
-      typeof s.urls === 'string' ? s.urls.startsWith('stun:') : 
-      Array.isArray(s.urls) ? s.urls.some(u => u.startsWith('stun:')) : false
-    );
-    return stun ? (Array.isArray(stun.urls) ? stun.urls[0] : stun.urls) : this.config.webrtc.iceServers[0]?.urls;
-  }
   
   // Get full config object
   getConfig() {

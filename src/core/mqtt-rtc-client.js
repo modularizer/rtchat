@@ -66,9 +66,6 @@ import { MQTTLoader } from './mqtt-loader.js';
 import { EventEmitter } from '../utils/event-emitter.js';
 import { DeferredPromise } from '../utils/deferred-promise.js';
 
-// Legacy exports for backward compatibility (used by vanilla adapter)
-export let tabID = null; // Exported for backward compatibility, but managed by TabManager
-export let defaultConfig = null; // Exported for backward compatibility, but use RTCConfig instead
 
 
 //______________________________________________________________________________________________________________________
@@ -100,16 +97,10 @@ class BaseMQTTRTCClient extends EventEmitter {
     
     // Set properties from config
     const tabIDValue = tabManager ? tabManager.getTabID() : null;
-    // Export tabID for backward compatibility
-    if (typeof window !== 'undefined') {
-      tabID = tabIDValue;
-    }
-    
     this.name = configObj.name + (tabIDValue ? ('(' + tabIDValue + ')') : '');
     this.userInfo = configObj.userInfo || {};
     this.mqttBroker = configObj.mqtt.broker;
     this.iceServers = configObj.webrtc.iceServers;
-    this.stunServer = config.stunServer; // Backward compatibility getter
     this.baseTopic = configObj.topic.base;
     this.topic = config.topic;
     this.config = config;
@@ -172,6 +163,7 @@ class BaseMQTTRTCClient extends EventEmitter {
 
 
     this.mqttHistory = [];
+    this.announceInterval = null; // For periodic announcements
 
     // load the MQTT client
     if (load){
@@ -197,46 +189,27 @@ class BaseMQTTRTCClient extends EventEmitter {
   }
   //________________________________________________________ MQTT BASICS _______________________________________________
   async load(){
-    // Use MQTTLoader if available, otherwise use legacy loading
-    if (this.mqttLoader) {
-      try {
-        await this.mqttLoader.load();
-        const mqtt = this.mqttLoader.getMQTT();
-        if (!mqtt) {
-          throw new Error('MQTT library not available');
-        }
-        
-        const config = this.config ? this.config.getConfig() : {};
-        const clientId = config.mqtt?.clientId || (this.baseTopic + this.name);
-        const mqttOptions = {
-          clientId: clientId,
-          ...config.mqtt
-        };
-        
-        this.client = mqtt.connect(this.mqttBroker, mqttOptions);
-        this.client.on('connect', this._onMQTTConnect.bind(this));
-        this.client.on('message', this._onMQTTMessage.bind(this));
-        
-        if (typeof window !== 'undefined') {
-          window.addEventListener("beforeunload", this.beforeunload.bind(this));
-        }
-        return;
-      } catch (e) {
-        console.warn('Failed to load MQTT via MQTTLoader, falling back to legacy:', e);
-      }
+    // Use MQTTLoader (always available now)
+    await this.mqttLoader.load();
+    const mqtt = this.mqttLoader.getMQTT();
+    if (!mqtt) {
+      throw new Error('MQTT library not available');
     }
     
-    // Legacy MQTT loading
-    if (typeof window === 'undefined' || !window.mqtt){
-      // if the MQTT library isn't loaded yet by the script tag in HTML, try again in 100ms
-      setTimeout(this.load.bind(this), 100);
-      return;
-    }
-
-    // connect to the MQTT broker
-    this.client = window.mqtt.connect(this.mqttBroker, {clientId: this.baseTopic + this.name});
+    const configObj = this.config.getConfig();
+    const clientId = configObj.mqtt?.clientId || (this.baseTopic + this.name);
+    const mqttOptions = {
+      clientId: clientId,
+      username: configObj.mqtt.username,
+      password: configObj.mqtt.password,
+      reconnectPeriod: configObj.mqtt.reconnectPeriod,
+      connectTimeout: configObj.mqtt.connectTimeout
+    };
+    
+    this.client = mqtt.connect(this.mqttBroker, mqttOptions);
     this.client.on('connect', this._onMQTTConnect.bind(this));
     this.client.on('message', this._onMQTTMessage.bind(this));
+    
     if (typeof window !== 'undefined') {
       window.addEventListener("beforeunload", this.beforeunload.bind(this));
     }
@@ -245,10 +218,44 @@ class BaseMQTTRTCClient extends EventEmitter {
     this.client.subscribe(this.topic, ((err)=>{
     if (!err) {
         console.log("subscribed to ", this.topic);
-        setTimeout((() => {
+        // Send initial connect message immediately after subscription is confirmed
+        // This ensures we announce our presence as soon as we're ready to receive messages
         this.postPubliclyToMQTTServer("connect", this.userInfo);
-        this.onConnectedToMQTT();}).bind(this), 1000);
-
+        this.onConnectedToMQTT();
+        
+        // Also set up periodic announcements to catch any missed connections
+        // This handles race conditions when two users connect simultaneously
+        // Announce every 3 seconds for the first 15 seconds, then every 30 seconds
+        // Only announce if we don't have active connections (to reduce noise)
+        let announcementCount = 0;
+        this.announceInterval = setInterval(() => {
+          // Only send periodic announcements if we have no active connections
+          // This reduces unnecessary connect messages when already connected
+          const hasActiveConnections = Object.keys(this.rtcConnections).some(user => {
+            const conn = this.rtcConnections[user];
+            return conn && conn.peerConnection.connectionState === "connected";
+          });
+          
+          if (!hasActiveConnections || announcementCount < 5) {
+            this.postPubliclyToMQTTServer("connect", this.userInfo);
+          }
+          
+          announcementCount++;
+          // After 5 announcements (15 seconds), switch to less frequent announcements
+          if (announcementCount >= 5 && this.announceInterval) {
+            clearInterval(this.announceInterval);
+            // Switch to less frequent announcements (every 30 seconds, only if no connections)
+            this.announceInterval = setInterval(() => {
+              const hasActiveConnections = Object.keys(this.rtcConnections).some(user => {
+                const conn = this.rtcConnections[user];
+                return conn && conn.peerConnection.connectionState === "connected";
+              });
+              if (!hasActiveConnections) {
+                this.postPubliclyToMQTTServer("connect", this.userInfo);
+              }
+            }, 30000);
+          }
+        }, 3000);
     }else {
         console.error("Error subscribing to " + this.topic, err);
     }
@@ -264,18 +271,11 @@ class BaseMQTTRTCClient extends EventEmitter {
         if (t === this.topic){
             let payload;
             try{
-                // Try to use MQTTLoader's decompression if available
-                if (this.mqttLoader) {
-                  const decompressed = this.mqttLoader.decompress(payloadString);
-                  payload = typeof decompressed === 'string' ? JSON.parse(decompressed) : decompressed;
-                } else if (typeof window !== 'undefined' && window.LZString) {
-                  // Legacy decompression
-                  let d = window.LZString.decompressFromUint8Array(payloadString);
-                  payload = JSON.parse(d);
-                } else {
-                  payload = JSON.parse(payloadString);
-                }
+                // Use MQTTLoader for decompression
+                const decompressed = this.mqttLoader.decompress(payloadString);
+                payload = typeof decompressed === 'string' ? JSON.parse(decompressed) : decompressed;
             }catch(e){
+                // Fallback to uncompressed if decompression fails
                 payload = JSON.parse(payloadString);
             }
             if (payload.sender === this.name){
@@ -316,6 +316,12 @@ class BaseMQTTRTCClient extends EventEmitter {
       this.disconnectFromUser(user);
     }
     
+    // Stop periodic announcements
+    if (this.announceInterval) {
+      clearInterval(this.announceInterval);
+      this.announceInterval = null;
+    }
+    
     // Cleanup MQTT client
     if (this.client) {
       this.client.end();
@@ -343,10 +349,6 @@ class BaseMQTTRTCClient extends EventEmitter {
       if (compressed !== payloadString) {
         payloadString = compressed;
       }
-    } else if (typeof window !== 'undefined' && window.LZString){
-      // Legacy compression
-      let compressed = window.LZString.compressToUint8Array(payloadString);
-      payloadString = compressed;
     }
     
     console.log("Sending message to " + this.topic + " subtopic " + subtopic, data);
@@ -362,10 +364,34 @@ class BaseMQTTRTCClient extends EventEmitter {
   mqttHandlers = {
     connect: payload => {//connection
         console.log("Received notice that someone else connected:" + payload.sender, payload, payload.data);
-        if (this.rtcConnections[payload.sender]){
-            console.warn("Disconnect " + payload.sender);
-            this.disconnectFromUser(payload.sender);
+        
+        // Check if we're already connected and the connection is healthy
+        const existingConnection = this.rtcConnections[payload.sender];
+        if (existingConnection) {
+            const connectionState = existingConnection.peerConnection.connectionState;
+            const iceConnectionState = existingConnection.peerConnection.iceConnectionState;
+            
+            // If connection is healthy, ignore this connect message (likely a periodic announcement)
+            if (connectionState === "connected" && 
+                (iceConnectionState === "connected" || iceConnectionState === "completed")) {
+                console.log("Already connected to " + payload.sender + ", ignoring connect message");
+                this.knownUsers[payload.sender] = payload.data; // Update user info
+                return;
+            }
+            
+            // Connection exists but is broken, disconnect it
+            if (connectionState === "failed" || connectionState === "closed" ||
+                iceConnectionState === "failed" || iceConnectionState === "closed") {
+                console.warn("Connection to " + payload.sender + " is broken, disconnecting");
+                this.disconnectFromUser(payload.sender);
+            } else {
+                // Connection is in progress (connecting, etc.), don't interfere
+                console.log("Connection to " + payload.sender + " is in progress (" + connectionState + "), ignoring");
+                this.knownUsers[payload.sender] = payload.data; // Update user info
+                return;
+            }
         }
+        
         this.knownUsers[payload.sender] = payload.data;
         this.shouldConnectToUser(payload.sender, payload.data).then(r => {
             if (r){
@@ -374,7 +400,7 @@ class BaseMQTTRTCClient extends EventEmitter {
         })
     },
     nameChange: payload => {//name
-        this.recordNameChange(data.oldName, data.newName);
+        this.recordNameChange(payload.data.oldName, payload.data.newName);
     },
     unload: payload => {
         this.disconnectFromUser(payload.sender);
@@ -589,7 +615,13 @@ class BaseMQTTRTCClient extends EventEmitter {
             console.warn("Not connected to " + user);
             continue;
         }else{
-            this.rtcConnections[user].send(channel, serializedData);
+            const sendResult = this.rtcConnections[user].send(channel, serializedData);
+            // If send returns a promise (channel not ready), handle it
+            if (sendResult && typeof sendResult.then === 'function') {
+                sendResult.catch(err => {
+                    console.error(`Failed to send on channel ${channel} to ${user}:`, err);
+                });
+            }
         }
     }
   }
@@ -774,8 +806,11 @@ class RTCConnection {
             return;
         }
         this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
-        this.loadPromise.then((() => this.send("connectedViaRTC", null)).bind(this));
-        this.mqttClient.onConnectedToUser(this.target);
+        // Wait for all data channels to be ready before notifying connection
+        this.loadPromise.then((() => {
+            this.send("connectedViaRTC", null);
+            this.mqttClient.onConnectedToUser(this.target);
+        }).bind(this));
     }
     send(channel, serializedData){
         let dataChannel = this.dataChannels[channel];
@@ -785,9 +820,42 @@ class RTCConnection {
             }
             throw new Error("No data channel for " + channel);
         }
+        
+        // If channel is not open, wait for it to open
         if (dataChannel.readyState !== "open"){
-            throw new Error("Channel not open: " + dataChannel.readyState);
+            if (dataChannel.readyState === "closed") {
+                throw new Error("Channel closed: " + channel);
+            }
+            // Channel is connecting, wait for it to open
+            return new Promise((resolve, reject) => {
+                const timeout = setTimeout(() => {
+                    reject(new Error(`Channel ${channel} did not open within 10 seconds`));
+                }, 10000);
+                
+                const onOpen = () => {
+                    clearTimeout(timeout);
+                    dataChannel.removeEventListener('open', onOpen);
+                    dataChannel.removeEventListener('error', onError);
+                    try {
+                        dataChannel.send(serializedData);
+                        resolve();
+                    } catch (e) {
+                        reject(e);
+                    }
+                };
+                
+                const onError = (e) => {
+                    clearTimeout(timeout);
+                    dataChannel.removeEventListener('open', onOpen);
+                    dataChannel.removeEventListener('error', onError);
+                    reject(new Error(`Channel ${channel} error: ${e.message || e}`));
+                };
+                
+                dataChannel.addEventListener('open', onOpen);
+                dataChannel.addEventListener('error', onError);
+            });
         }
+        
         dataChannel.send(serializedData);
     }
     onmessage(event, channel){
@@ -1208,18 +1276,6 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         config.load = false;
         super(config);
         
-        // Legacy callback arrays - kept for backward compatibility but now use EventEmitter
-        // These will be removed in future versions
-        this.onConnectedCallbacks = [];
-        this.onDisconnectedCallbacks = [];
-        this.onNameChangeCallbacks = [];
-        this.onDMCallbacks = [];
-        this.onChatCallbacks = [];
-        this.receivePingCallbacks = [];
-        this.onRTCQuestionCallbacks = [];
-        this.onRTCAnswerCallbacks = [];
-        this.onMQTTMessageCallbacks = [];
-        this.onCallConnectedCallbacks = [];
 
         if (load){
             this.load();
@@ -1250,37 +1306,7 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
             return super.on(rtcevent, handler);
         }else{
             // All other events use EventEmitter
-            // Also maintain legacy callback arrays for backward compatibility
-            const boundHandler = handler.bind(this);
-            
-            // Add to EventEmitter
-            const unsubscribe = super.on(rtcevent, boundHandler);
-            
-            // Also add to legacy arrays for backward compatibility
-            const callbackMap = {
-                "connectedtopeer": this.onConnectedCallbacks,
-                "disconnectedfrompeer": this.onDisconnectedCallbacks,
-                "namechange": this.onNameChangeCallbacks,
-                "dm": this.onDMCallbacks,
-                "chat": this.onChatCallbacks,
-                "answer": this.onRTCAnswerCallbacks,
-                "ping": this.receivedPingCallbacks,
-                "mqtt": this.onMQTTMessageCallbacks,
-                "callconnected": this.onCallConnectedCallbacks
-            };
-            
-            if (callbackMap[rtcevent]) {
-                callbackMap[rtcevent].push(boundHandler);
-            }
-            
-            // Return unsubscribe function that removes from both
-            return () => {
-                unsubscribe();
-                if (callbackMap[rtcevent]) {
-                    const index = callbackMap[rtcevent].indexOf(boundHandler);
-                    if (index > -1) callbackMap[rtcevent].splice(index, 1);
-                }
-            };
+            return super.on(rtcevent, handler);
         }
     }
 
@@ -1293,10 +1319,7 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
     }
     onNameChange(oldName, newName){
         super.onNameChange(oldName, newName);
-        // Emit event (EventEmitter)
         this.emit('namechange', oldName, newName);
-        // Also call legacy callbacks for backward compatibility
-        this.onNameChangeCallbacks.forEach(h => h(oldName, newName));
     }
 
     onConnectedToMQTT(){
@@ -1305,38 +1328,23 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
     }
     onConnectedToUser(user){
         console.log("Connected to user ", user);
-        // Emit event (EventEmitter)
         this.emit('connectedtopeer', user);
-        // Also call legacy callbacks for backward compatibility
-        this.onConnectedCallbacks.forEach(h => h(user));
     }
     onDisconnectedFromUser(user){
         console.log("Disconnected from user ", user);
-        // Emit event (EventEmitter)
         this.emit('disconnectedfrompeer', user);
-        // Also call legacy callbacks for backward compatibility
-        this.onDisconnectedCallbacks.forEach(h => h(user));
     }
     onRTCDM(data, sender){
-        // Emit event (EventEmitter)
         this.emit('dm', data, sender);
-        // Also call legacy callbacks for backward compatibility
-        this.onDMCallbacks.forEach(h => h(data, sender));
     }
     onRTCChat(data, sender){
-        // Emit event (EventEmitter)
         this.emit('chat', data, sender);
-        // Also call legacy callbacks for backward compatibility
-        this.onChatCallbacks.forEach(h => h(data, sender));
     }
     addQuestionHandler(name, handler){
         super.addQuestionHandler(name, handler);
     }
     oncallconnected(sender, {localStream, remoteStream}){
-        // Emit event (EventEmitter)
         this.emit('callconnected', sender, {localStream, remoteStream});
-        // Also call legacy callbacks for backward compatibility
-        this.onCallConnectedCallbacks.forEach(h => h(sender, {localStream, remoteStream}));
     }
 
     pingEveryone(){
@@ -1353,10 +1361,7 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         });
     }
     receivedPing(sender){
-        // Emit event (EventEmitter)
         this.emit('ping', sender);
-        // Also call legacy callbacks for backward compatibility
-        this.receivedPingCallbacks.forEach(h => h(sender));
     }
 
     // nextUserConnection is a promise that resolves when the client connects to a new user
@@ -1414,8 +1419,5 @@ class Peer{
 
 //____________________________________________________________________________________________________________________
 // Export main classes
-export {MQTTRTCClient, BaseMQTTRTCClient, PromisefulMQTTRTCClient, RTCConnection, Peer, DeferredPromise, tabID, defaultConfig};
-
-// Export new modules if they're available (for use in refactored version)
-// These will be undefined if new modules aren't loaded, which is fine for backward compatibility
+export {MQTTRTCClient, BaseMQTTRTCClient, PromisefulMQTTRTCClient, RTCConnection, Peer, DeferredPromise};
 export { RTCConfig, LocalStorageAdapter, TabManager, MQTTLoader };

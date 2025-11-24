@@ -179,7 +179,7 @@ class BasicVideoChat extends HTMLElement {
         
         // Inject window object or use global window
         this._window = options.window || (typeof window !== 'undefined' ? window : null);
-        this._assignToWindow = options.assignToWindow !== false; // Default: true for backward compatibility
+        this._assignToWindow = options.assignToWindow !== false;
         
         this.attachShadow({ mode: 'open' });
         this.shadowRoot.innerHTML = `
@@ -243,7 +243,7 @@ class BasicVideoChat extends HTMLElement {
             this.show
         );
         
-        // Optional window assignment (for backward compatibility)
+        // Optional window assignment
         if (this._assignToWindow && this._window) {
             this._window.vc = this;
         }
