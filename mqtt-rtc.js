@@ -74,7 +74,7 @@ if (n && n.startsWith("anon")){
 }
 let name = n || ("anon" + Math.floor(Math.random() * 1000));
 if (name.startsWith("anon")){
-    name = prompt("Enter your name");
+    name = "User #" + name.slice(4);
 }
 
 
