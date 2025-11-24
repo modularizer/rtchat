@@ -1,0 +1,93 @@
+{
+  "name": "@rtchat/core",
+  "version": "2.0.0",
+  "description": "Cross-platform peer-to-peer communication library using WebRTC and MQTT. Framework-agnostic core with dependency injection for storage, crypto, and more.",
+  "type": "module",
+  "main": "./dist/rtchat-core.umd.js",
+  "module": "./dist/rtchat-core.esm.js",
+  "browser": "./dist/rtchat-core.js",
+  "types": "./types/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/rtchat-core.esm.js",
+      "require": "./dist/rtchat-core.umd.js",
+      "browser": "./dist/rtchat-core.js",
+      "default": "./dist/rtchat-core.esm.js"
+    },
+    "./core": {
+      "import": "./dist/rtchat-core.esm.js",
+      "require": "./dist/rtchat-core.umd.js",
+      "browser": "./dist/rtchat-core.js"
+    },
+    "./ui": {
+      "import": "./dist/rtchat-ui.esm.js",
+      "require": "./dist/rtchat-ui.umd.js",
+      "browser": "./dist/rtchat-ui.js"
+    },
+    "./full": {
+      "import": "./dist/rtchat.esm.js",
+      "require": "./dist/rtchat.umd.js",
+      "browser": "./dist/rtchat.iife.js"
+    },
+    "./react": "./dist/adapters/react.js",
+    "./vue": "./dist/adapters/vue.js",
+    "./vanilla": "./dist/adapters/vanilla.js",
+    "./config": "./src/config/rtc-config.js",
+    "./storage": "./src/storage/local-storage-adapter.js"
+  },
+  "files": [
+    "dist",
+    "types",
+    "src",
+    "*.js",
+    "*.html",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "rollup -c",
+    "dev": "rollup -c -w",
+    "type-check": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [
+    "webrtc",
+    "mqtt",
+    "p2p",
+    "peer-to-peer",
+    "serverless",
+    "realtime",
+    "chat",
+    "messaging",
+    "communication",
+    "signaling",
+    "data-channels",
+    "video-calling",
+    "audio-calling",
+    "cryptography",
+    "identity-verification",
+    "cross-platform",
+    "framework-agnostic",
+    "react",
+    "vue",
+    "svelte",
+    "angular"
+  ],
+  "author": "",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "devDependencies": {
+    "@rollup/plugin-node-resolve": "^15.2.3",
+    "@rollup/plugin-terser": "^0.4.4",
+    "rollup": "^4.9.0"
+  },
+  "peerDependencies": {},
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/modularizer/rtchat.git"
+  }
+}
+

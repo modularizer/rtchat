@@ -1,6 +1,57 @@
-import { ChatBox } from "./chat-box.js";
-import { SignedMQTTRTCClient } from "./signed-mqtt-rtc.js";
-import { BasicVideoChat } from "./video-chat.js";
+/**
+ * RTChat - Complete chat application with video calling and identity verification
+ * 
+ * This is the main entry point for the RTChat application. It combines:
+ * - ChatBox: UI for text messaging
+ * - SignedMQTTRTCClient: Secure RTC client with cryptographic identity verification
+ * - BasicVideoChat: Video calling interface
+ * 
+ * Usage:
+ *   <!-- Auto-add to page -->
+ *   <script type="module" src="./rtchat.js?add=true"></script>
+ *   
+ *   <!-- Or manually create -->
+ *   <rtc-hat></rtc-hat>
+ *   <script type="module">
+ *     import { RTChat } from './rtchat.js';
+ *     const chat = document.querySelector('rtc-hat');
+ *   </script>
+ * 
+ * Features:
+ * - Text chat with room-based messaging
+ * - Video/audio calling between peers
+ * - Cryptographic identity verification (RSA-PSS)
+ * - Trust level management (strict, moderate, lax, etc.)
+ * - Connection request prompts
+ * - Validation notifications
+ * - Persistent room/name settings in localStorage
+ * 
+ * Configuration:
+ *   const chat = new RTChat({
+ *     showRoomInput: true,  // Show/hide room input field
+ *     topic: 'myroom',      // Chat room name
+ *     trustMode: 'moderate' // Trust level: 'strict', 'moderate', 'lax', 'unsafe', etc.
+ *   });
+ * 
+ * Trust Modes:
+ * - strict: Only trust known peers, prompt for others
+ * - moderate: Trust known peers and aliases, prompt for suspicious cases
+ * - lax: Trust most peers, prompt only for very suspicious cases
+ * - unsafe: Trust everyone (not recommended)
+ * 
+ * Events:
+ * - 'connectionrequest': Fired when a peer wants to connect (returns Promise<boolean>)
+ * - 'validation': Fired when a peer is validated (peerName, trusted)
+ * - 'validationfailure': Fired when validation fails (peerName, message)
+ * - 'call': Fired when receiving a call (peerName, info, promises)
+ * - 'callended': Fired when a call ends
+ * 
+ * @module rtchat
+ */
+
+import { ChatBox } from "../../ui/chat-box.js";
+import { SignedMQTTRTCClient } from "../../core/signed-client.js";
+import { BasicVideoChat } from "../../ui/video-chat.js";
 
 
 class RTChat extends ChatBox {

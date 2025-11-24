@@ -1,21 +1,45 @@
 # RTChat
 
-RTChat is a serverless chat system built using WebRTC and MQTT. 
+RTChat is a **cross-platform, framework-agnostic** peer-to-peer communication library using WebRTC and MQTT. 
 
-* Public MQTT brokers and stun servers are used only for the initial signaling process to exchange information between the clients.
-  * because the mqtt broker and stun servers are publicly accessible, there is no backend for this project, only staticly served files
-  * the public servers are only used very briefly to exchange small amounts of info when new clients connect
-  * it takes **~3kB** of data transfer over mqtt to establish a connection between two clients
-* Once the clients have exchanged the necessary information, they can communicate directly and securely with each other using WebRTC.
+## Features
 
-## Try It
-* [RTChat](https://modularizer.github.io/rtchat/)
+* ✅ **Serverless**: No backend required - uses public MQTT brokers and STUN servers only for initial signaling (~3kB per connection)
+* ✅ **Cross-platform**: Works in browser, Node.js, React Native, and any JavaScript environment
+* ✅ **Framework-agnostic**: Use with React, Vue, Svelte, Angular, or vanilla JS
+* ✅ **Dependency injection**: Inject storage, crypto, and platform-specific APIs
+* ✅ **Identity verification**: RSA-PSS cryptographic challenge/response system
+* ✅ **Zero dependencies**: No external runtime dependencies
+* ✅ **End-to-end encrypted**: WebRTC connections are encrypted by default
 
-Note: I did very minimal work on the UI, so it is not very pretty. 
-The focus and interest was on the functionality of the chat system.
-If someone else wants to make it look nice or add UI features like emojis, reactions, file sharing, etc. please feel free to fork the project!
+## Installation
 
-## Quick Start (to use the barebones chat system in your own project)
+```bash
+npm install @rtchat/core
+```
+
+## Quick Start
+
+### npm Package (Recommended)
+
+```javascript
+import { MQTTRTCClient } from '@rtchat/core';
+
+const client = new MQTTRTCClient({
+  name: 'MyName',
+  topic: 'myroom'
+});
+
+client.on('connectedtopeer', (user) => {
+  console.log('Connected to', user);
+});
+
+client.on('chat', (message, sender) => {
+  console.log(`${sender}: ${message}`);
+});
+```
+
+### CDN / HTML (Legacy)
 ```html
 <script src="https://modularizer.github.io/rtchat/rtchat.js?add"></script>
 ```

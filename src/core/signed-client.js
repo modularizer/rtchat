@@ -1,229 +1,74 @@
-import { MQTTRTCClient } from "./mqtt-rtc.js";
+/**
+ * Signed MQTT-RTC Client - Secure peer-to-peer communication with identity verification
+ * 
+ * Extends MQTTRTCClient with cryptographic identity verification using RSA-PSS keys.
+ * Implements a challenge/response system to verify peer identities and prevent impersonation.
+ * 
+ * Usage:
+ *   import { SignedMQTTRTCClient } from './signed-mqtt-rtc.js';
+ *   
+ *   const client = new SignedMQTTRTCClient({
+ *     name: 'MyName',
+ *     trustMode: 'moderate',  // Trust configuration
+ *     generate: true          // Generate new keys if none exist
+ *   });
+ * 
+ *   client.on('validation', (peerName, trusted) => {
+ *     console.log(`Peer ${peerName} validated, trusted: ${trusted}`);
+ *   });
+ * 
+ *   client.on('validationfailure', (peerName, message) => {
+ *     console.error(`Validation failed for ${peerName}: ${message}`);
+ *   });
+ * 
+ * Identity System:
+ * - Each client generates an RSA-PSS key pair (2048-bit)
+ * - Public keys are stored in localStorage (knownHostsStrings)
+ * - Private keys are stored encrypted in localStorage
+ * - Identity = name + "|" + publicKeyString
+ * 
+ * Trust Levels:
+ * - reject: Do not connect
+ * - promptandtrust: Prompt user, then trust if challenge passes
+ * - connectandprompt: Connect first, then prompt to trust
+ * - connectandtrust: Connect and automatically trust
+ * 
+ * Trust Modes (pre-configured trust level mappings):
+ * - strict: Only auto-trust "the one and only" known peers
+ * - moderate: Trust known peers and aliases, prompt for others
+ * - lax: Trust most cases, prompt only for suspicious ones
+ * - unsafe: Trust everyone (not recommended)
+ * - rejectall: Reject all connections
+ * 
+ * User Categories (automatic detection):
+ * - theoneandonly: Known key and name match perfectly
+ * - knownwithknownaliases: Known key, but also known by other names
+ * - possiblenamechange: Known key, but different name
+ * - possiblesharedpubkey: Known key with multiple other names
+ * - nameswapcollision: Suspicious name/key mismatch
+ * - pretender: Unknown key using a known name
+ * - nevermet: Completely new peer
+ * 
+ * Challenge/Response Flow:
+ * 1. When connecting, peers exchange public keys via MQTT
+ * 2. After WebRTC connection, challenge is sent via RTC
+ * 3. Peer signs challenge with private key
+ * 4. Signature is verified using stored public key
+ * 5. If valid, peer is added to validatedPeers list
+ * 
+ * Methods:
+ * - trust(peerName): Trust a peer and save their public key
+ * - challenge(peerName): Challenge a peer to prove identity
+ * - untrust(peerName): Remove trust and disconnect
+ * - register(identity): Register a peer's identity (name|publicKey)
+ * - reset(): Clear all keys and known hosts
+ * 
+ * @module signed-mqtt-rtc
+ */
 
-class Keys {
-    algorithm = {
-      name: "RSA-PSS",
-      modulusLength: 2048,
-      publicExponent: new Uint8Array([1, 0, 1]),
-      hash: {name: "SHA-256"},
-    }
-    extractable = true;
-    keyUsages = ["sign", "verify"];
-
-    constructor(name, generate=true) {
-        this._name = null;
-        this.name = name;
-
-        this._loadKeys = this._loadKeys.bind(this);
-        this.load = this.load.bind(this);
-        this.generate = this.generate.bind(this);
-        this._dumpKey = this._dumpKey.bind(this);
-        this._loadPrivateKey = this._loadPrivateKey.bind(this);
-        this._loadPublicKey = this._loadPublicKey.bind(this);
-        this.sign = this.sign.bind(this);
-        this.getChallengeString = this.getChallengeString.bind(this);
-        this.verify = this.verify.bind(this);
-        this.savePublicKey = this.savePublicKey.bind(this);
-        this.savePublicKeyString = this.savePublicKeyString.bind(this);
-        this.getPublicKey = this.getPublicKey.bind(this);
-        this.clearOwnKeys = this.clearOwnKeys.bind(this);
-        this.clearKnownHosts = this.clearKnownHosts.bind(this);
-        this.getPeerNames = this.getPeerNames.bind(this);
-        this.reset = this.reset.bind(this);
-
-        this.loadedPromise = this.load(generate);
-    }
-    load(generate=true) {
-        this.loading = true;
-        this.loaded = false;
-        this.loadedPromise = this._loadKeys(generate).then((keys) => {
-            this._knownHostsStrings = JSON.parse(localStorage.getItem("knownHostsStrings") || "{}");
-            for (let [name, key] of Object.entries(this._knownHostsStrings)) {
-                if (name.startsWith("anon")){
-                    delete this._knownHostsStrings[name];
-                }
-            }
-            this._knownHostsKeys = {};
-            this._privateKey = keys.privateKey;
-            this._publicKey = keys.publicKey;
-            this._privateKeyString = keys.privateKeyString;
-            this.publicKeyString = keys.publicKeyString;
-            localStorage.setItem("privateKeyString", this._privateKeyString);
-            localStorage.setItem("publicKeyString", this.publicKeyString);
-            this.loaded = true;
-            this.loading = false;
-            return this.publicKeyString;
-        });
-        return this.loadedPromise;
-    }
-    _loadKeys(generate=true) {
-        let privateKeyString = localStorage.getItem("privateKeyString");
-        let publicKeyString = localStorage.getItem("publicKeyString");
-        if (generate !== 'force' && publicKeyString && privateKeyString) {
-            return this._loadPrivateKey(privateKeyString).then((privateKey) => {
-                return this._loadPublicKey(publicKeyString).then((publicKey) => {
-                    return {privateKey, publicKey, privateKeyString, publicKeyString};
-                });
-            })
-        }
-        if (!generate) {
-            throw new Error("No keys found and generate is false");
-        }
-        return this.generate()
-    }
-    generate(){
-        return window.crypto.subtle.generateKey(
-            this.algorithm, this.extractable, this.keyUsages
-        ).then((keys) => {
-            return this._dumpKey(keys.privateKey).then(privateKeyString => {
-                keys.privateKeyString = privateKeyString;
-                return this._dumpKey(keys.publicKey).then(publicKeyString => {
-                    keys.publicKeyString = publicKeyString;
-                    return keys;
-                });
-            });
-        });
-    }
-    _dumpKey(key){
-        return window.crypto.subtle.exportKey("jwk", key).then(JSON.stringify);
-    }
-    _loadPrivateKey(key){
-        return window.crypto.subtle.importKey("jwk", JSON.parse(key), this.algorithm, this.extractable, ["sign"])
-    }
-    _loadPublicKey(key){
-        return window.crypto.subtle.importKey("jwk", JSON.parse(key), this.algorithm, this.extractable, ["verify"])
-    }
-    getChallengeString() {
-        return Array.from(window.crypto.getRandomValues(new Uint8Array(32))).map(b => String.fromCharCode(b)).join('');
-    }
-    sign(challenge) {
-        if (this.loading && !this._loaded) {
-            return this.loadedPromise.then(() => this.sign(challenge));
-        }
-        return window.crypto.subtle.sign(
-            {
-                name: "RSA-PSS",
-                saltLength: 32,
-            },
-            this._privateKey,
-            new Uint8Array(challenge.split('').map((c) => c.charCodeAt(0))).buffer
-        ).then((signature) => {
-            return String.fromCharCode.apply(null, new Uint8Array(signature));
-        });
-    }
-    verify(publicKeyString, signatureString, challenge) {
-        return this._loadPublicKey(publicKeyString).then((publicKey) => {
-            return window.crypto.subtle.verify(
-                {
-                    name: "RSA-PSS",
-                    saltLength: 32,
-                },
-                publicKey,
-                new Uint8Array(signatureString.split('').map((c) => c.charCodeAt(0))).buffer,
-                new Uint8Array(challenge.split('').map((c) => c.charCodeAt(0))).buffer
-            );
-        });
-    }
-    getPeerNames(publicKeyString) {
-        let matchingPeers = [];
-        for (let [name, key] of Object.entries(this._knownHostsStrings)) {
-            if (key === publicKeyString) {
-                matchingPeers.push(name);
-            }
-        }
-        return matchingPeers;
-    }
-    savePublicKey(peerName, publicKey) {
-        peerName = peerName.split("|")[0].split("(")[0].trim();
-        if (publicKey instanceof CryptoKey) {
-            return this._dumpKey(publicKey).then((publicKeyString) => {
-                this.savePublicKey(peerName, publicKeyString);
-                this._knownHostsKeys[peerName] = publicKey;
-                return true;
-            });
-        }else{
-            return this.savePublicKeyString(peerName, publicKey);
-        }
-    }
-    savePublicKeyString(peerName, publicKeyString) {
-        peerName = peerName.split("|")[0].split("(")[0].trim();
-        let matchingPeers = this.getPeerNames(publicKeyString);
-        if (matchingPeers.length > 0) {
-            console.error("Public key already registered for another peer", matchingPeers);
-            throw new Error("Public key already registered for another peer");
-        }
-        this._knownHostsStrings[peerName] = publicKeyString;
-        localStorage.setItem("knownHostsStrings", JSON.stringify(this._knownHostsStrings));
-        return true;
-    }
-
-    getPublicKey(peerName) {
-        peerName = peerName.split("|")[0].split("(")[0].trim();
-        let publicKey = this._knownHostsKeys[peerName];
-        if (publicKey) { return Promise.resolve(publicKey); }
-        let publicKeyString = this._knownHostsStrings[peerName];
-        if (publicKeyString) {
-            return this._loadPublicKey(publicKeyString).then((publicKey) => {
-                this._knownHostsKeys[peerName] = publicKey;
-                return publicKey;
-            });
-        }
-        return Promise.resolve(null);
-    }
-    getPublicKeyString(peerName) {
-        peerName = peerName.split("|")[0].split("(")[0].trim();
-        return this._knownHostsStrings[peerName];
-    }
-    removePublicKey(peerName) {
-        peerName = peerName.split("|")[0].split("(")[0].trim();
-        delete this._knownHostsStrings[peerName];
-        delete this._knownHostsKeys[peerName];
-        localStorage.setItem("knownHostsStrings", JSON.stringify(this._knownHostsStrings));
-    }
-
-    get knownHosts() {
-        return Object.entries(this._knownHostsStrings).map(([name, key]) => {
-            return name + "|" + key;
-        });
-    }
-    clearOwnKeys() {
-        localStorage.removeItem("privateKeyString");
-        localStorage.removeItem("publicKeyString");
-        this._privateKey = null;
-        this._publicKey = null;
-        this._privateKeyString = null;
-        this.publicKeyString = null;
-    }
-    clearKnownHosts() {
-        localStorage.removeItem("knownHostsStrings");
-        this._knownHostsKeys = {};
-        this._knownHostsStrings = {};
-    }
-
-    reset(){
-        this.clearOwnKeys();
-        this.clearKnownHosts();
-    }
-
-    get name(){return this._name}
-    set name(name) {
-        if (name.includes("|")) {
-            throw new Error("Name cannot contain |");
-        }
-        this._name = name;
-    }
-
-    get identity() {
-        if (!this.loaded){return null}
-        let name = this.name.split("|")[0].split("(")[0].trim();
-        return name + "|" + this.publicKeyString;
-    }
-
-    register(identity) {
-        let [peerName, publicKeyString] = identity.split("|");
-        return this.savePublicKeyString(peerName, publicKeyString);
-    }
-}
+import { MQTTRTCClient } from "./mqtt-rtc-client.js";
+import { RTCConfig } from "../config/rtc-config.js";
+import { Keys } from "../crypto/keys.js";
 
 let trustLevels = {
     reject: 0, // do not even connect
@@ -241,16 +86,67 @@ let suspicionLevels = {
     }
 
 class SignedMQTTRTCClient extends MQTTRTCClient {
-    constructor(config) {
-        let {name, userInfo, questionHandlers, handlers, topic, generate, load, trustMode} = config || {};
-        if (load === undefined) {load = true;}
-        if (generate === undefined) {generate = true;}
+    constructor(userConfig) {
+        userConfig = userConfig || {};
+        
+        // Extract config values - support both new RTCConfig and legacy format
+        let config, generate, load, trustMode, name;
+        
+        // Check if userConfig is an RTCConfig instance
+        const isRTCConfig = userConfig instanceof RTCConfig;
+        
+        if (isRTCConfig) {
+            config = userConfig;
+            const configObj = config.getConfig();
+            generate = userConfig.generate !== false;
+            load = configObj.load !== false;
+            trustMode = userConfig.trustMode || configObj.trustMode || "strict";
+            name = config.name;
+        } else {
+            // Try to create RTCConfig from userConfig, or use legacy
+            try {
+                config = new RTCConfig(userConfig);
+                const configObj = config.getConfig();
+                generate = userConfig.generate !== false;
+                load = configObj.load !== false;
+                trustMode = userConfig.trustMode || configObj.trustMode || "strict";
+                name = config.name;
+            } catch (e) {
+                // Fall back to legacy if RTCConfig creation fails
+                config = userConfig;
+                generate = userConfig.generate !== false;
+                load = userConfig.load !== false;
+                trustMode = userConfig.trustMode || "strict";
+                name = userConfig.name;
+            }
+        }
 
-        config.load = false;
-        super(config);
-        this.keys = new Keys(this.name, generate);
+        // Prepare config for parent (don't pass load flag, we'll handle it)
+        const parentConfig = (config instanceof RTCConfig) ? 
+            config : 
+            { ...userConfig, load: false };
+        super(parentConfig);
+        
+        // Get name from config or use the one we extracted
+        if (!name) {
+            name = this.name ? this.name.split('(')[0] : (userConfig.name || 'User');
+        }
+        
+        // Initialize keys with storage adapter and crypto from config
+        const storage = this.storage || (typeof localStorage !== 'undefined' ? {
+          getItem: (key) => localStorage.getItem(key),
+          setItem: (key, value) => localStorage.setItem(key, value),
+          removeItem: (key) => localStorage.removeItem(key)
+        } : null);
+        
+        // Get crypto from config or fall back to window.crypto
+        const configObj = config instanceof RTCConfig ? config.getConfig() : {};
+        const crypto = configObj.crypto || (typeof window !== 'undefined' && window.crypto ? window.crypto : null);
+        
+        this.keys = new Keys(name, generate, { storage, crypto });
         this.validatedPeers = [];
 
+        // Set up trust configuration
         if (trustMode === undefined) {trustMode = "strict";}
         if (this.trustConfigs[trustMode]){
             this.trustConfig = this.trustConfigs[trustMode];
@@ -271,6 +167,7 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         this.challenge = this.challenge.bind(this);
         this.untrust = this.untrust.bind(this);
 
+        // Legacy callbacks - kept for backward compatibility, now also use EventEmitter
         this.validatedCallbacks = [];
         this.failedCallbacks = [];
 
@@ -637,10 +534,18 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
     on(event, callback) {
         if (event === "connectionrequest"){
             this.connectionrequest = callback;
+            // Also register as event listener
+            return super.on(event, callback);
         }else if (event === "validation") {
-            this.validatedCallbacks.push(callback);
+            const boundCallback = callback.bind(this);
+            this.validatedCallbacks.push(boundCallback);
+            // Also use EventEmitter
+            return super.on(event, boundCallback);
         }else if (event === "validationfailure") {
-            this.failedCallbacks.push(callback);
+            const boundCallback = callback.bind(this);
+            this.failedCallbacks.push(boundCallback);
+            // Also use EventEmitter
+            return super.on(event, boundCallback);
         }else{
             return super.on(event, callback);
         }
@@ -651,11 +556,17 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
             console.log("Trusting peer " + peerName + " is who they say they are.");
         }
         console.log("Peer " + peerName + " validated");
+        // Emit event (EventEmitter)
+        this.emit('validation', peerName, trusting);
+        // Also call legacy callbacks for backward compatibility
         this.validatedCallbacks.forEach((cb) => cb(peerName, trusting));
     }
-    onValidationFailed(peerName) {
-        console.error("Peer " + peerName + " validation failed");
-        this.failedCallbacks.forEach((cb) => cb(peerName));
+    onValidationFailed(peerName, message) {
+        console.error("Peer " + peerName + " validation failed" + (message ? ": " + message : ""));
+        // Emit event (EventEmitter)
+        this.emit('validationfailure', peerName, message);
+        // Also call legacy callbacks for backward compatibility
+        this.failedCallbacks.forEach((cb) => cb(peerName, message));
     }
     untrust(peerName) {
         /* remove a public key from a peer */

@@ -1,124 +1,131 @@
-// _____________________________________________ tab ID _______________________________________________________________
+/**
+ * MQTT-RTC Client Library - Core peer-to-peer communication system
+ * 
+ * This module provides a complete implementation for establishing peer-to-peer connections
+ * using MQTT for signaling and WebRTC for direct communication. It handles connection
+ * management, data channels, video/audio calls, and message passing.
+ * 
+ * Architecture:
+ * - BaseMQTTRTCClient: Base class with MQTT and WebRTC connection logic
+ * - PromisefulMQTTRTCClient: Adds promise-based APIs for async operations
+ * - MQTTRTCClient: High-level client with event callbacks and peer management
+ * - RTCConnection: Manages individual WebRTC peer connections
+ * - Peer: Convenience wrapper for interacting with a specific peer
+ * 
+ * Usage:
+ *   import { MQTTRTCClient } from './mqtt-rtc.js';
+ *   
+ *   const client = new MQTTRTCClient({
+ *     name: 'MyName',
+ *     topic: 'myroom',
+ *     broker: 'wss://broker.example.com',
+ *     stunServer: 'stun:stun.example.com:19302'
+ *   });
+ * 
+ *   client.on('connectedtopeer', (user) => {
+ *     console.log('Connected to', user);
+ *   });
+ * 
+ *   client.on('chat', (message, sender) => {
+ *     console.log(`${sender}: ${message}`);
+ *   });
+ * 
+ *   // Send a message to all connected peers
+ *   client.sendRTCChat('Hello everyone!');
+ * 
+ *   // Get a peer object for direct interaction
+ *   const peer = client.getPeer('OtherUser');
+ *   peer.dm('Private message');
+ *   peer.ask('What is 2+2?').then(answer => console.log(answer));
+ * 
+ * Features:
+ * - Automatic connection establishment via MQTT signaling
+ * - WebRTC data channels for messaging
+ * - Video/audio calling support
+ * - Question/answer system for RPC-like communication
+ * - Ping/pong for connection health checks
+ * - Tab ID management for multiple tabs
+ * - Message compression using LZ-String
+ * - Connection history tracking
+ * 
+ * Configuration:
+ * - broker: MQTT broker URL (default: public cloud.shiftr.io)
+ * - stunServer: STUN server for NAT traversal (default: Google STUN)
+ * - baseTopic: Base MQTT topic prefix (default: 'mrtchat')
+ * - topic: Room/channel identifier (auto-derived from URL by default)
+ * - name: User identifier (auto-generated if not provided)
+ * 
+ * @module mqtt-rtc
+ */
 
-// find the id of all the tabs open
-let existingTabs = JSON.parse(localStorage.getItem('tabs') || '[]');
+// Import new refactored modules
+import { RTCConfig } from '../config/rtc-config.js';
+import { LocalStorageAdapter } from '../storage/local-storage-adapter.js';
+import { TabManager } from './tab-manager.js';
+import { MQTTLoader } from './mqtt-loader.js';
+import { EventEmitter } from '../utils/event-emitter.js';
+import { DeferredPromise } from '../utils/deferred-promise.js';
 
-let timeNow = Date.now();
-for (let existingTabID of existingTabs){
-    let ts = localStorage.getItem("tabpoll_" + existingTabID);
-    if (ts){
-        let lastUpdateTime = new Date(1 * ts);
-        if ((lastUpdateTime == "Invalid Date") || ((timeNow - lastUpdateTime) > 300)){
-            localStorage.removeItem("tabpoll_" + existingTabID);
-            existingTabs = existingTabs.filter(v=>v!==existingTabID);
-            localStorage.setItem('tabs', JSON.stringify(existingTabs));
-        }
-    }else{
-        localStorage.removeItem("tabpoll_" + existingTabID);
-        existingTabs = existingTabs.filter(v=>v!==existingTabID);
-        localStorage.setItem('tabs', JSON.stringify(existingTabs));
-    }
-}
-existingTabs = JSON.parse(localStorage.getItem('tabs') || '[]');
-
-let maxTabID = existingTabs.length?(Math.max(...existingTabs)):-1;
-let minTabID = existingTabs.length?(Math.min(...existingTabs)):-1;
-let tabID = (minTabID<10)?(maxTabID + 1):0;
-existingTabs.push(tabID);
-localStorage.setItem('tabs', JSON.stringify(existingTabs));
-
-
-localStorage.setItem("tabpoll_" + tabID, Date.now().toString());
-let tabInterval = setInterval(() => {
-    localStorage.setItem("tabpoll_" + tabID, Date.now().toString());
-}, 250);
-console.log("Tab ID: ", tabID);
-
-// When the tab is closed or reloaded, decrement the count and notify other tabs
-//window.addEventListener('beforeunload', function () {
-//  console.log("beforeunload of tab " + tabID);
-//  clearInterval(tabInterval);
-//  localStorage.setItem('tabs', JSON.stringify(JSON.parse(localStorage.getItem('tabs') || '[]').filter(v=>v!==tabID)));
-//});
-//___________________________________________________________________________________________________________________
-
-// automatically load the MQTT library
-let script = document.createElement('script');
-script.src = "https://unpkg.com/mqtt/dist/mqtt.min.js";
-document.head.appendChild(script);
-
-let lz = true;
-if (lz){
-    let lzStringScript = document.createElement('script');
-    lzStringScript.src = "https://cdnjs.cloudflare.com/ajax/libs/lz-string/1.4.4/lz-string.min.js";
-    document.head.appendChild(lzStringScript);
-}
-
-
-
-
-//__________________________________________ DEFERRED PROMISE __________________________________________________________
-class DeferredPromise {
-    constructor() {
-        this.promise = new Promise((resolve, reject) => {
-            this.resolve = resolve;
-            this.reject = reject;
-        })
-    }
-}
-
-// _____________________________ default name _________________________________
-let n = localStorage.getItem("name");
-if (n && n.startsWith("anon")){
-    n = null;
-}
-let name = n || ("anon" + Math.floor(Math.random() * 1000));
-if (name.startsWith("anon")){
-    name = "User #" + name.slice(4);
-}
-
-
-//______________________________________________________ CONFIGURATION _________________________________________________
-let defaultConfig = {
-    broker: 'wss://public:public@public.cloud.shiftr.io',
-    stunServer: "stun:stun4.l.google.com:19302",
-    baseTopic: "mrtchat",
-    topic: (["localhost", "127.0.0.1", "modularizer.github.io"].includes(location.hostname)?"":location.hostname) + location.pathname.replace("rtchat/","").replace("index.html", "").replace(".html", "").replace(/[^a-zA-Z0-9]/g, ""),
-    name: name,
-}
+// Legacy exports for backward compatibility (used by vanilla adapter)
+export let tabID = null; // Exported for backward compatibility, but managed by TabManager
+export let defaultConfig = null; // Exported for backward compatibility, but use RTCConfig instead
 
 
 //______________________________________________________________________________________________________________________
 
 
 
-class BaseMQTTRTCClient {
-  constructor(config){
-    config = config || {};
-    let {name, userInfo, load, baseTopic, topic, broker, stunServer} = config;
-    // specify a tabID to allow multiple tabs to be open at once
-    if (load === undefined){
-        load = true;
-    }
+// EventEmitter is now imported above
 
-    name = name || defaultConfig.name
-    if (name.includes("(") || name.includes(")") || name.includes("|")){
-        throw new Error("Name cannot contain (, ), or |")
+class BaseMQTTRTCClient extends EventEmitter {
+  constructor(userConfig){
+    super(); // Initialize EventEmitter
+    userConfig = userConfig || {};
+    
+    // Use RTCConfig system (always available now)
+    const config = userConfig instanceof RTCConfig ? userConfig : new RTCConfig(userConfig);
+    const configObj = config.getConfig();
+    
+    // Initialize storage adapter
+    const storage = userConfig.storage || new LocalStorageAdapter();
+    
+    // Initialize tab manager
+    let tabManager = null;
+    if (configObj.tabs.enabled) {
+      tabManager = new TabManager(storage, configObj);
     }
-    if (name != name.trim()){
-        throw new Error("Name cannot have leading or trailing spaces")
+    
+    // Initialize MQTT loader
+    const mqttLoader = new MQTTLoader(configObj);
+    
+    // Set properties from config
+    const tabIDValue = tabManager ? tabManager.getTabID() : null;
+    // Export tabID for backward compatibility
+    if (typeof window !== 'undefined') {
+      tabID = tabIDValue;
     }
-    if (!name.startsWith("anon")){
-        // save the name to local storage to persist it
-        localStorage.setItem("name", name);
+    
+    this.name = configObj.name + (tabIDValue ? ('(' + tabIDValue + ')') : '');
+    this.userInfo = configObj.userInfo || {};
+    this.mqttBroker = configObj.mqtt.broker;
+    this.iceServers = configObj.webrtc.iceServers;
+    this.stunServer = config.stunServer; // Backward compatibility getter
+    this.baseTopic = configObj.topic.base;
+    this.topic = config.topic;
+    this.config = config;
+    this.storage = storage;
+    this.tabManager = tabManager;
+    this.mqttLoader = mqttLoader;
+    this.maxHistoryLength = configObj.history.maxLength;
+    
+    // Save name to storage if not anonymous
+    if (!configObj.name.startsWith("anon") && !configObj.name.startsWith("User #")) {
+      storage.setItem("name", configObj.name);
+      storage.setItem("rtchat_name", configObj.name);
     }
-    this.name = name + (tabID?('(' + tabID + ')'):''); // add the tab ID to the name
-    this.userInfo = userInfo || {};
-
-    this.mqttBroker = broker || defaultConfig.broker;
-    this.stunServer = stunServer || defaultConfig.stunServer;
-    this.baseTopic = baseTopic || defaultConfig.baseTopic;
-    this.topic = this.baseTopic + (topic || defaultConfig.topic);
+    
+    // Load flag
+    const load = userConfig.load !== false;
 
     // bind methods to this
     // MQTT methods
@@ -165,13 +172,17 @@ class BaseMQTTRTCClient {
 
 
     this.mqttHistory = [];
-    this.maxHistoryLength = 1000;
 
     // load the MQTT client
     if (load){
         this.load();
     }
-    if (window.rtc){
+    
+    // Optional window.rtc assignment (can be disabled via config)
+    const assignToWindow = userConfig.assignToWindow !== false;
+    
+    if (assignToWindow && typeof window !== 'undefined') {
+      if (window.rtc){
         let old = window.rtc;
         console.warn("RTC already exists. Saving old RTC object to window.rtc.old,", old);
         let oldName = old.name;
@@ -179,23 +190,56 @@ class BaseMQTTRTCClient {
             oldName: old,
             name: this
         }
-    }else{
+      }else{
         window.rtc = this;
+      }
     }
   }
   //________________________________________________________ MQTT BASICS _______________________________________________
-  load(){
-    if (!window.mqtt){
-        // if the MQTT library isn't loaded yet byt the script tag in HTML, try again in 100ms
-        setTimeout(this.load.bind(this), 100);
+  async load(){
+    // Use MQTTLoader if available, otherwise use legacy loading
+    if (this.mqttLoader) {
+      try {
+        await this.mqttLoader.load();
+        const mqtt = this.mqttLoader.getMQTT();
+        if (!mqtt) {
+          throw new Error('MQTT library not available');
+        }
+        
+        const config = this.config ? this.config.getConfig() : {};
+        const clientId = config.mqtt?.clientId || (this.baseTopic + this.name);
+        const mqttOptions = {
+          clientId: clientId,
+          ...config.mqtt
+        };
+        
+        this.client = mqtt.connect(this.mqttBroker, mqttOptions);
+        this.client.on('connect', this._onMQTTConnect.bind(this));
+        this.client.on('message', this._onMQTTMessage.bind(this));
+        
+        if (typeof window !== 'undefined') {
+          window.addEventListener("beforeunload", this.beforeunload.bind(this));
+        }
         return;
+      } catch (e) {
+        console.warn('Failed to load MQTT via MQTTLoader, falling back to legacy:', e);
+      }
+    }
+    
+    // Legacy MQTT loading
+    if (typeof window === 'undefined' || !window.mqtt){
+      // if the MQTT library isn't loaded yet by the script tag in HTML, try again in 100ms
+      setTimeout(this.load.bind(this), 100);
+      return;
     }
 
     // connect to the MQTT broker
-    this.client = mqtt.connect(this.mqttBroker, {clientId: this.baseTopic + this.name});
+    this.client = window.mqtt.connect(this.mqttBroker, {clientId: this.baseTopic + this.name});
     this.client.on('connect', this._onMQTTConnect.bind(this));
     this.client.on('message', this._onMQTTMessage.bind(this));
-    window.addEventListener("beforeunload", this.beforeunload.bind(this));
+    if (typeof window !== 'undefined') {
+      window.addEventListener("beforeunload", this.beforeunload.bind(this));
+    }
   }
   _onMQTTConnect(){
     this.client.subscribe(this.topic, ((err)=>{
@@ -214,15 +258,25 @@ class BaseMQTTRTCClient {
   }
     onConnectedToMQTT(){
         console.log("Connected to MQTT: " + this.topic + " as " + this.name);
+        this.emit('mqttconnected', this.topic, this.name);
     }
   _onMQTTMessage(t, payloadString){
         if (t === this.topic){
             let payload;
             try{
-                let d = LZString.decompressFromUint8Array(payloadString);
-                payload = JSON.parse(d);
+                // Try to use MQTTLoader's decompression if available
+                if (this.mqttLoader) {
+                  const decompressed = this.mqttLoader.decompress(payloadString);
+                  payload = typeof decompressed === 'string' ? JSON.parse(decompressed) : decompressed;
+                } else if (typeof window !== 'undefined' && window.LZString) {
+                  // Legacy decompression
+                  let d = window.LZString.decompressFromUint8Array(payloadString);
+                  payload = JSON.parse(d);
+                } else {
+                  payload = JSON.parse(payloadString);
+                }
             }catch(e){
-                payload = JSON.parse(payloadString)
+                payload = JSON.parse(payloadString);
             }
             if (payload.sender === this.name){
                 return;
@@ -245,9 +299,33 @@ class BaseMQTTRTCClient {
     }
   onMQTTMessage(subtopic, data, sender, timestamp){
     console.log("Received message from " + sender + " on " + subtopic, data);
+    this.emit('mqttmessage', subtopic, data, sender, timestamp);
   }
   beforeunload(){
     this.postPubliclyToMQTTServer("unload", "disconnecting");
+    
+    // Cleanup tab manager if using new system
+    if (this.tabManager) {
+      this.tabManager.cleanup();
+    }
+  }
+  
+  disconnect(){
+    // Cleanup connections
+    for (let user of Object.keys(this.rtcConnections)) {
+      this.disconnectFromUser(user);
+    }
+    
+    // Cleanup MQTT client
+    if (this.client) {
+      this.client.end();
+      this.client = null;
+    }
+    
+    // Cleanup tab manager
+    if (this.tabManager) {
+      this.tabManager.cleanup();
+    }
   }
   postPubliclyToMQTTServer(subtopic, data){
     let payload = {
@@ -258,10 +336,19 @@ class BaseMQTTRTCClient {
     }
     let payloadString = JSON.stringify(payload);
     let originalLength = payloadString.length;
-    if (window.LZString){
-        let compressed = LZString.compressToUint8Array(payloadString);
+    
+    // Use MQTTLoader's compression if available
+    if (this.mqttLoader) {
+      const compressed = this.mqttLoader.compress(payloadString);
+      if (compressed !== payloadString) {
         payloadString = compressed;
+      }
+    } else if (typeof window !== 'undefined' && window.LZString){
+      // Legacy compression
+      let compressed = window.LZString.compressToUint8Array(payloadString);
+      payloadString = compressed;
     }
+    
     console.log("Sending message to " + this.topic + " subtopic " + subtopic, data);
     this.client.publish(this.topic, payloadString);
     payload.sent = true;
@@ -443,6 +530,7 @@ class BaseMQTTRTCClient {
   }
   onConnectedToUser(user){
     console.log("Connected to user ", user);
+    this.emit('connectedtopeer', user);
   }
   isConnectedToUser(user){
     return this.rtcConnections[user] && this.rtcConnections[user].peerConnection.connectionState === "connected";
@@ -454,18 +542,26 @@ class BaseMQTTRTCClient {
     }
     console.log("Disconnected from user ", user);
     delete this.rtcConnections[user];
-    if (this.onDisconnectedFromUser){
-        this.onDisconnectedFromUser(user);
-    }
+    this.onDisconnectedFromUser(user);
   }
   onDisconnectedFromUser(user){
     console.log("Disconnected from user ", user);
+    this.emit('disconnectedfrompeer', user);
   }
 
   changeName(newName){
     let oldName = this.name;
-    this.name = newName + "_" + tabID;
-    localStorage.setItem("name", newName);
+    const tabID = this.tabManager ? this.tabManager.getTabID() : (typeof tabID !== 'undefined' ? tabID : null);
+    this.name = newName + (tabID ? ('(' + tabID + ')') : '');
+    
+    // Use storage adapter if available, otherwise use localStorage
+    if (this.storage) {
+      this.storage.setItem("name", newName);
+      this.storage.setItem("rtchat_name", newName);
+    } else if (typeof localStorage !== 'undefined') {
+      localStorage.setItem("name", newName);
+    }
+    
     this.postPubliclyToMQTTServer("nameChange", {oldName: this.name, newName});
   }
   recordNameChange(oldName, newName){
@@ -517,6 +613,8 @@ class BaseMQTTRTCClient {
     }else{
         console.warn("No handler found for " + channel);
     }
+    // Emit generic RTC message event
+    this.emit('rtcmessage', channel, deserializedData, sender);
   }
   onrtcerror(channel, error, sender){
     let handler = this.rtcHandlers[channel];
@@ -529,7 +627,17 @@ class BaseMQTTRTCClient {
 
 class RTCConnection {
     constructor(mqttClient, target){
-        this.rtcConfiguration = { "iceServers": [{ "urls": mqttClient.stunServer }] }
+        // Use iceServers array if available, otherwise fall back to stunServer
+        const iceServers = mqttClient.iceServers || 
+          (mqttClient.stunServer ? [{ urls: mqttClient.stunServer }] : 
+           [{ urls: "stun:stun4.l.google.com:19302" }]);
+        
+        this.rtcConfiguration = { 
+          iceServers: iceServers,
+          iceTransportPolicy: mqttClient.config?.getConfig()?.webrtc?.iceTransportPolicy || 'all',
+          bundlePolicy: mqttClient.config?.getConfig()?.webrtc?.bundlePolicy || 'balanced',
+          rtcpMuxPolicy: mqttClient.config?.getConfig()?.webrtc?.rtcpMuxPolicy || 'require'
+        };
         this.target = target;
         this.mqttClient = mqttClient;
         this.dataChannels = {};
@@ -955,6 +1063,8 @@ class PromisefulMQTTRTCClient extends BaseMQTTRTCClient {
         this.nextMQTTMessagePromises[subtopic].resolve([data, sender, timestamp]);
         delete this.nextMQTTMessagePromises[subtopic];
     }
+    // Call parent to emit event
+    super.onMQTTMessage(subtopic, data, sender, timestamp);
   }
 
  //__________________________________________________ RTC ______________________________________________________________
@@ -1097,6 +1207,9 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         }
         config.load = false;
         super(config);
+        
+        // Legacy callback arrays - kept for backward compatibility but now use EventEmitter
+        // These will be removed in future versions
         this.onConnectedCallbacks = [];
         this.onDisconnectedCallbacks = [];
         this.onNameChangeCallbacks = [];
@@ -1114,34 +1227,60 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
 
     }
     on(rtcevent, handler){
+        // Use EventEmitter for standard events, but handle special cases
         if (rtcevent === "connectionrequest"){
+            // Special case: connectionrequest sets shouldConnectToUser
             this.shouldConnectToUser = handler.bind(this);
-        }else if(rtcevent === "connectedtopeer"){
-            this.onConnectedCallbacks.push(handler.bind(this));
-        }else if (rtcevent === "disconnectedfrompeer"){
-            this.onDisconnectedCallbacks.push(handler.bind(this));
-        }else if (rtcevent === "namechange"){
-            this.onNameChangeCallbacks.push(handler.bind(this));
-        }else if (rtcevent === "dm"){
-            this.onDMCallbacks.push(handler.bind(this));
-        }else if (rtcevent === "chat"){
-            this.onChatCallbacks.push(handler.bind(this));
-        }else if (rtcevent === "question"){
-//            this.respondToQuestion = handler.bind(this);
-        }else if (rtcevent === "answer"){
-            this.onRTCAnswerCallbacks.push(handler.bind(this));
-        }else if (rtcevent === "ping"){
-            this.receivedPingCallbacks.push(handler.bind(this));
-        }else if (rtcevent === "mqtt"){
-            this.onMQTTMessageCallbacks.push(handler.bind(this));
-        }else if (rtcevent === "callconnected"){
-            this.onCallConnectedCallbacks.push(handler.bind(this));
+            // Also register as event listener for consistency
+            return super.on(rtcevent, handler);
         }else if (rtcevent === "call"){
+            // Special case: call sets acceptCallFromUser
             this.acceptCallFromUser = handler.bind(this);
+            // Also register as event listener
+            return super.on(rtcevent, handler);
         }else if (rtcevent === "callended"){
+            // Special case: callended sets oncallended
             this.oncallended = handler.bind(this);
-        }else{
+            // Also register as event listener
+            return super.on(rtcevent, handler);
+        }else if (rtcevent === "question"){
+            // Question handlers are registered via addQuestionHandler
             this.addQuestionHandler(rtcevent, handler);
+            // Also emit events for consistency
+            return super.on(rtcevent, handler);
+        }else{
+            // All other events use EventEmitter
+            // Also maintain legacy callback arrays for backward compatibility
+            const boundHandler = handler.bind(this);
+            
+            // Add to EventEmitter
+            const unsubscribe = super.on(rtcevent, boundHandler);
+            
+            // Also add to legacy arrays for backward compatibility
+            const callbackMap = {
+                "connectedtopeer": this.onConnectedCallbacks,
+                "disconnectedfrompeer": this.onDisconnectedCallbacks,
+                "namechange": this.onNameChangeCallbacks,
+                "dm": this.onDMCallbacks,
+                "chat": this.onChatCallbacks,
+                "answer": this.onRTCAnswerCallbacks,
+                "ping": this.receivedPingCallbacks,
+                "mqtt": this.onMQTTMessageCallbacks,
+                "callconnected": this.onCallConnectedCallbacks
+            };
+            
+            if (callbackMap[rtcevent]) {
+                callbackMap[rtcevent].push(boundHandler);
+            }
+            
+            // Return unsubscribe function that removes from both
+            return () => {
+                unsubscribe();
+                if (callbackMap[rtcevent]) {
+                    const index = callbackMap[rtcevent].indexOf(boundHandler);
+                    if (index > -1) callbackMap[rtcevent].splice(index, 1);
+                }
+            };
         }
     }
 
@@ -1154,27 +1293,49 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
     }
     onNameChange(oldName, newName){
         super.onNameChange(oldName, newName);
+        // Emit event (EventEmitter)
+        this.emit('namechange', oldName, newName);
+        // Also call legacy callbacks for backward compatibility
+        this.onNameChangeCallbacks.forEach(h => h(oldName, newName));
     }
 
-    onConnectedToMQTT(){console.log("Connected to MQTT");}
+    onConnectedToMQTT(){
+        console.log("Connected to MQTT");
+        this.emit('mqttconnected');
+    }
     onConnectedToUser(user){
         console.log("Connected to user ", user);
+        // Emit event (EventEmitter)
+        this.emit('connectedtopeer', user);
+        // Also call legacy callbacks for backward compatibility
         this.onConnectedCallbacks.forEach(h => h(user));
     }
     onDisconnectedFromUser(user){
         console.log("Disconnected from user ", user);
+        // Emit event (EventEmitter)
+        this.emit('disconnectedfrompeer', user);
+        // Also call legacy callbacks for backward compatibility
         this.onDisconnectedCallbacks.forEach(h => h(user));
     }
     onRTCDM(data, sender){
+        // Emit event (EventEmitter)
+        this.emit('dm', data, sender);
+        // Also call legacy callbacks for backward compatibility
         this.onDMCallbacks.forEach(h => h(data, sender));
     }
     onRTCChat(data, sender){
+        // Emit event (EventEmitter)
+        this.emit('chat', data, sender);
+        // Also call legacy callbacks for backward compatibility
         this.onChatCallbacks.forEach(h => h(data, sender));
     }
     addQuestionHandler(name, handler){
         super.addQuestionHandler(name, handler);
     }
     oncallconnected(sender, {localStream, remoteStream}){
+        // Emit event (EventEmitter)
+        this.emit('callconnected', sender, {localStream, remoteStream});
+        // Also call legacy callbacks for backward compatibility
         this.onCallConnectedCallbacks.forEach(h => h(sender, {localStream, remoteStream}));
     }
 
@@ -1192,6 +1353,9 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
         });
     }
     receivedPing(sender){
+        // Emit event (EventEmitter)
+        this.emit('ping', sender);
+        // Also call legacy callbacks for backward compatibility
         this.receivedPingCallbacks.forEach(h => h(sender));
     }
 
@@ -1249,4 +1413,9 @@ class Peer{
 
 
 //____________________________________________________________________________________________________________________
-export {MQTTRTCClient, DeferredPromise, tabID, defaultConfig, existingTabs};
+// Export main classes
+export {MQTTRTCClient, BaseMQTTRTCClient, PromisefulMQTTRTCClient, RTCConnection, Peer, DeferredPromise, tabID, defaultConfig};
+
+// Export new modules if they're available (for use in refactored version)
+// These will be undefined if new modules aren't loaded, which is fine for backward compatibility
+export { RTCConfig, LocalStorageAdapter, TabManager, MQTTLoader };

@@ -1,3 +1,55 @@
+/**
+ * Video Chat Components - WebRTC video calling interface
+ * 
+ * Provides video calling functionality with local and remote video streams.
+ * Consists of two classes:
+ * - RTCVideoChat: Core logic for managing video streams and calls
+ * - BasicVideoChat: Web Component UI for displaying video
+ * 
+ * Usage:
+ *   import { BasicVideoChat } from './video-chat.js';
+ *   
+ *   const videoChat = new BasicVideoChat(rtcClient, {
+ *     window: window,        // Optional: inject window object
+ *     assignToWindow: false // Optional: disable window.vc assignment
+ *   });
+ *   document.body.appendChild(videoChat);
+ * 
+ *   // Start a call
+ *   videoChat.call('PeerName').then(() => {
+ *     console.log('Call started');
+ *   });
+ * 
+ *   // End a call
+ *   videoChat.endCall('PeerName');
+ * 
+ * Features:
+ * - Local video preview (small overlay)
+ * - Remote video display (main view)
+ * - Automatic stream management
+ * - Multiple peer support
+ * - Call state management
+ * - Responsive layout
+ * 
+ * RTCVideoChat (Core Logic):
+ * - Manages MediaStream objects (local and remote)
+ * - Handles call lifecycle (start, accept, end)
+ * - Integrates with RTC client for signaling
+ * - Provides callbacks for UI updates (setLocalSrc, setRemoteSrc, hide, show)
+ * 
+ * BasicVideoChat (Web Component):
+ * - Custom element: <video-chat></video-chat>
+ * - Displays video elements with proper styling
+ * - Handles window resizing (via injected window object)
+ * - Auto-hides when no active calls
+ * 
+ * Integration:
+ * The video chat automatically receives 'callconnected' events from the RTC client
+ * and displays the video streams. It also handles 'calldisconnected' events.
+ * 
+ * @module video-chat
+ */
+
 class RTCVideoChat  {
     constructor(rtc, setLocalSrc, setRemoteSrc, hide, show) {
         this.setLocalSrc = setLocalSrc;
@@ -122,8 +174,13 @@ class RTCVideoChat  {
 
 
 class BasicVideoChat extends HTMLElement {
-    constructor(rtc) {
+    constructor(rtc, options = {}) {
         super();
+        
+        // Inject window object or use global window
+        this._window = options.window || (typeof window !== 'undefined' ? window : null);
+        this._assignToWindow = options.assignToWindow !== false; // Default: true for backward compatibility
+        
         this.attachShadow({ mode: 'open' });
         this.shadowRoot.innerHTML = `
             <style>
@@ -172,14 +229,24 @@ class BasicVideoChat extends HTMLElement {
         this.setRemoteSrc = this.setRemoteSrc.bind(this);
         this.hide = this.hide.bind(this);
         this.show = this.show.bind(this);
-        window.addEventListener('resize', this.resize.bind(this));
+        this.resize = this.resize.bind(this);
+        
+        // Add resize listener if window is available
+        if (this._window) {
+            this._window.addEventListener('resize', this.resize);
+        }
+        
         this.rtcVC = new RTCVideoChat(rtc,
             this.setLocalSrc,
             this.setRemoteSrc,
             this.hide,
             this.show
         );
-        window.vc = this;
+        
+        // Optional window assignment (for backward compatibility)
+        if (this._assignToWindow && this._window) {
+            this._window.vc = this;
+        }
 
         this.call = this.rtcVC.call.bind(this.rtcVC);
         this.endCall = this.rtcVC.endCall.bind(this.rtcVC);
@@ -200,9 +267,11 @@ class BasicVideoChat extends HTMLElement {
         this.container.style.display = "flex";
     }
     resize() {
+        if (!this._window) return;
+        
         // Optionally adjust the size based on the window size or other conditions
-        const width = window.innerWidth;
-        const height = window.innerHeight;
+        const width = this._window.innerWidth;
+        const height = this._window.innerHeight;
 
         // Example: Adjust max-width/max-height based on conditions
         this.container.style.maxWidth = width > 600 ? '50vw' : '80vw';
@@ -211,7 +280,9 @@ class BasicVideoChat extends HTMLElement {
 
     // Don't forget to remove the event listener when the element is disconnected
     disconnectedCallback() {
-        window.removeEventListener('resize', this.resize.bind(this));
+        if (this._window) {
+            this._window.removeEventListener('resize', this.resize);
+        }
     }
 
 }

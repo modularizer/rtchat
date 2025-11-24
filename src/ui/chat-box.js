@@ -1,3 +1,37 @@
+/**
+ * ChatBox - A Web Component for displaying and managing chat messages
+ * 
+ * This custom HTML element provides a complete chat interface with:
+ * - Message display with chat bubbles (color-coded by user)
+ * - Active user list with visual indicators
+ * - Message input with keyboard shortcuts (Enter to send)
+ * - Room and name configuration
+ * - Integration with RTC clients for peer-to-peer messaging
+ * 
+ * Usage:
+ *   <chat-box></chat-box>
+ *   <script>
+ *     import { LocalStorageAdapter } from './storage/local-storage-adapter.js';
+ *     const chatBox = document.querySelector('chat-box');
+ *     chatBox.storage = new LocalStorageAdapter(); // Optional: inject storage
+ *     chatBox.rtc = myRTCClient; // Set the RTC client to enable messaging
+ *   </script>
+ * 
+ * Features:
+ * - Automatically connects to RTC client when assigned via `rtc` property
+ * - Displays messages with timestamps (hover to see)
+ * - Shows active users with colored bubbles
+ * - Saves name to storage for persistence (uses StorageAdapter)
+ * - Supports room-based chat (configure via room input)
+ * - Responsive design with mobile-friendly sizing
+ * 
+ * Events:
+ * - Receives 'chat' events from RTC client
+ * - Receives 'connectedtopeer' and 'disconnectedfrompeer' events
+ * 
+ * @class ChatBox
+ * @extends HTMLElement
+ */
 class ChatBox extends HTMLElement {
   primaryUserColor = 'lightblue';
   userColors = [
@@ -9,6 +43,7 @@ class ChatBox extends HTMLElement {
   constructor() {
     super();
     this._rtc = null;
+    this._storage = null; // Storage adapter (injected)
 
     this.name = "?"
     this.history = [];
@@ -105,7 +140,11 @@ class ChatBox extends HTMLElement {
 
     this.emojiButton.addEventListener('click', ()=>{this.sendMessage("👋");});
 
-    this.chatName.value = localStorage.getItem("name") || "?";
+    // Use storage adapter if available, otherwise fall back to localStorage
+    const nameFromStorage = this.storage ? 
+      this.storage.getItem("name") : 
+      (typeof localStorage !== 'undefined' ? localStorage.getItem("name") : null);
+    this.chatName.value = nameFromStorage || "?";
     this.chatName.addEventListener('change', (() => {
         console.log("Name changed to " + this.chatName.value);
         if (this.rtc){
@@ -136,6 +175,45 @@ class ChatBox extends HTMLElement {
     this.chatBody.style.display = "block";
 
   }
+  /**
+   * Get or set the storage adapter for persistence
+   * @param {StorageAdapter} adapter - Storage adapter instance
+   * @returns {StorageAdapter} Current storage adapter (or fallback to localStorage)
+   */
+  get storage() {
+    // Return injected storage or create a fallback adapter
+    if (!this._storage && typeof window !== 'undefined' && window.localStorage) {
+      // Fall back to localStorage directly if adapter not injected
+      this._storage = {
+        getItem: (key) => {
+          try {
+            return localStorage.getItem(key);
+          } catch (e) {
+            return null;
+          }
+        },
+        setItem: (key, value) => {
+          try {
+            localStorage.setItem(key, value);
+          } catch (e) {
+            // Ignore storage errors
+          }
+        },
+        removeItem: (key) => {
+          try {
+            localStorage.removeItem(key);
+          } catch (e) {
+            // Ignore storage errors
+          }
+        }
+      };
+    }
+    return this._storage;
+  }
+  set storage(adapter) {
+    this._storage = adapter;
+  }
+
   get rtc(){return this._rtc}
   set rtc(rtc){
     this._rtc = rtc;
