@@ -2,6 +2,9 @@
 
 RTChat is a **cross-platform, framework-agnostic** peer-to-peer communication library using WebRTC and MQTT. 
 
+⚠️ RTChat is **INTENTIONALLY INSECURE**, prioritizing ease-of-use over protecting basic metadata about who you chat with and when.
+
+
 ## Features
 
 * ✅ **Serverless**: No backend required - uses public MQTT brokers and STUN servers only for initial signaling (~3kB per connection)
@@ -11,6 +14,7 @@ RTChat is a **cross-platform, framework-agnostic** peer-to-peer communication li
 * ✅ **Identity verification**: RSA-PSS cryptographic challenge/response system
 * ✅ **Zero dependencies**: No external runtime dependencies
 * ✅ **End-to-end encrypted**: WebRTC connections are encrypted by default
+* ⚠️ **Exposes metadata**: including IP addresses, room names, and user display names over public MQTT channels to facilitate a servless design
 
 ## Installation
 
@@ -22,6 +26,7 @@ npm install @rtchat/core
 
 - **[Custom UI Guide](./CUSTOM_UI_GUIDE.md)** - Complete guide for building your own chat UI
 - **[RTC Protocol Guide](./RTC_GUIDE.md)** - RTC channels, handlers, methods, and extending the protocol
+- **[Security Assessment](./SECURITY.md)** - Honest security overview, risks, and hardening options
 - Core API documentation in source files (JSDoc comments)
 
 ## Quick Start

@@ -1,1 +1,619 @@
-<script type="module" src="./src/adapters/vanilla/rtchat.js?add=true"></script>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RTChat - Serverless Peer-to-Peer Chat</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: #333;
+            background: #0a0a0a;
+            background-image: 
+                linear-gradient(45deg, rgba(255,255,255,0.02) 25%, transparent 25%),
+                linear-gradient(-45deg, rgba(255,255,255,0.02) 25%, transparent 25%),
+                linear-gradient(45deg, transparent 75%, rgba(255,255,255,0.02) 75%),
+                linear-gradient(-45deg, transparent 75%, rgba(255,255,255,0.02) 75%),
+                radial-gradient(circle at 20% 50%, rgba(100, 100, 120, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 80% 80%, rgba(80, 80, 100, 0.1) 0%, transparent 50%),
+                radial-gradient(circle at 40% 20%, rgba(60, 60, 80, 0.08) 0%, transparent 50%),
+                linear-gradient(135deg, rgba(30, 30, 40, 0.3) 0%, rgba(10, 10, 15, 0.5) 100%);
+            background-size: 60px 60px, 60px 60px, 60px 60px, 60px 60px, 800px 800px, 600px 600px, 700px 700px, 100% 100%;
+            background-position: 0 0, 0 30px, 30px -30px, -30px 0px, 0 0, 100% 100%, 50% 0%, 0 0;
+            min-height: 100vh;
+            position: relative;
+        }
+
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: 
+                linear-gradient(90deg, transparent 0%, rgba(100, 100, 120, 0.05) 50%, transparent 100%),
+                linear-gradient(0deg, transparent 0%, rgba(80, 80, 100, 0.05) 50%, transparent 100%);
+            background-size: 200% 200%, 200% 200%;
+            background-position: 0% 0%, 0% 0%;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        .container {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 2rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Ensure chat widget appears above page content */
+        chat-box,
+        rtc-hat {
+            position: relative;
+            z-index: 9999 !important;
+        }
+        
+        /* Ensure the chat container inside shadow DOM also has high z-index */
+        chat-box::part(container),
+        rtc-hat::part(container) {
+            z-index: 9999 !important;
+        }
+
+        header {
+            text-align: center;
+            color: #e0e0e0;
+            padding: 1.5rem 0;
+            text-shadow: 0 2px 10px rgba(0,0,0,0.5);
+            position: relative;
+        }
+
+        .github-link {
+            position: absolute;
+            top: 1.5rem;
+            right: 0;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            color: #8b9aff;
+            text-decoration: none;
+            font-size: 0.9rem;
+            padding: 0.5rem 1rem;
+            border: 1px solid rgba(139, 154, 255, 0.3);
+            border-radius: 8px;
+            background: rgba(139, 154, 255, 0.1);
+            transition: all 0.3s ease;
+        }
+
+        .github-link:hover {
+            background: rgba(139, 154, 255, 0.2);
+            border-color: rgba(139, 154, 255, 0.5);
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(139, 154, 255, 0.2);
+        }
+
+        .github-link svg {
+            width: 20px;
+            height: 20px;
+            fill: currentColor;
+        }
+
+        h1 {
+            font-size: 3.5rem;
+            margin-bottom: 0.5rem;
+            text-shadow: 2px 2px 4px rgba(0,0,0,0.2);
+        }
+
+        .tagline {
+            font-size: 1.5rem;
+            margin-bottom: 0.5rem;
+            opacity: 0.95;
+        }
+
+        .subtitle {
+            font-size: 1rem;
+            margin-bottom: 1rem;
+            opacity: 0.8;
+            color: #b0b0b0;
+        }
+
+        .main-content {
+            background: rgba(20, 20, 25, 0.95);
+            border: 1px solid rgba(255, 255, 255, 0.1);
+            border-radius: 20px;
+            padding: 3rem;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5), 0 0 0 1px rgba(255,255,255,0.05);
+            margin-bottom: 2rem;
+            backdrop-filter: blur(10px);
+        }
+
+        h2 {
+            color: #8b9aff;
+            font-size: 2rem;
+            margin-bottom: 1rem;
+            margin-top: 2rem;
+        }
+
+        h2:first-child {
+            margin-top: 0;
+        }
+
+        p {
+            margin-bottom: 1.5rem;
+            font-size: 1.1rem;
+            color: #d0d0d0;
+        }
+
+        .feature-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 1.5rem;
+            margin: 2rem 0;
+        }
+
+        .feature-card {
+            background: rgba(30, 30, 35, 0.8);
+            padding: 1.5rem;
+            border-radius: 10px;
+            border-left: 4px solid #8b9aff;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .feature-card h3 {
+            color: #8b9aff;
+            margin-bottom: 0.5rem;
+        }
+
+        .feature-card p {
+            color: #b0b0b0;
+        }
+
+        .code-block {
+            background: #1e1e1e;
+            color: #d4d4d4;
+            padding: 1.5rem;
+            border-radius: 10px;
+            overflow-x: auto;
+            margin: 1.5rem 0;
+            font-family: 'Courier New', monospace;
+            font-size: 0.95rem;
+            line-height: 1.6;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+
+        .code-block code {
+            color: #d4d4d4;
+            white-space: pre;
+            display: block;
+        }
+
+        .keyword { color: #569cd6; }
+        .string { color: #ce9178; }
+        .function { color: #dcdcaa; }
+        .comment { color: #6a9955; }
+        .number { color: #b5cea8; }
+
+        .highlight {
+            background: rgba(139, 154, 255, 0.2);
+            color: #b8c4ff;
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-weight: 500;
+            border: 1px solid rgba(139, 154, 255, 0.3);
+        }
+
+        .cta-section {
+            text-align: center;
+            padding: 2rem;
+            background: rgba(139, 154, 255, 0.15);
+            color: #e0e0e0;
+            border-radius: 10px;
+            margin-top: 2rem;
+            border: 1px solid rgba(139, 154, 255, 0.3);
+        }
+
+        .cta-section h2 {
+            color: #8b9aff;
+            margin-bottom: 1rem;
+        }
+
+        .button {
+            display: inline-block;
+            padding: 1rem 2rem;
+            background: rgba(139, 154, 255, 0.2);
+            color: #b8c4ff;
+            text-decoration: none;
+            border-radius: 8px;
+            font-weight: bold;
+            margin: 0.5rem;
+            transition: transform 0.2s, box-shadow 0.2s, background 0.2s;
+            border: 1px solid rgba(139, 154, 255, 0.4);
+        }
+
+        .button:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(139, 154, 255, 0.3);
+            background: rgba(139, 154, 255, 0.3);
+        }
+
+        .demo-section {
+            background: rgba(30, 30, 35, 0.6);
+            padding: 2rem;
+            border-radius: 10px;
+            margin: 2rem 0;
+            border: 1px solid rgba(255, 255, 255, 0.1);
+        }
+
+        .demo-section p {
+            color: #c0c0c0;
+        }
+
+        .demo-section em {
+            color: #999;
+        }
+
+        .security-warning {
+            background: rgba(139, 154, 255, 0.1);
+            border: 1px solid rgba(139, 154, 255, 0.3);
+            border-radius: 10px;
+            padding: 1rem;
+            margin: 1.5rem 0;
+            color: #c0c0c0;
+        }
+
+        .security-warning h3 {
+            color: #8b9aff;
+            margin-bottom: 0.5rem;
+            font-size: 1.1rem;
+        }
+
+        .security-warning p {
+            color: #c0c0c0;
+            margin-bottom: 0.5rem;
+            font-size: 0.95rem;
+        }
+
+        .markdown-modal {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.8);
+            z-index: 10000;
+            overflow-y: auto;
+            padding: 2rem;
+        }
+
+        .markdown-modal.active {
+            display: block;
+        }
+
+        .markdown-content {
+            max-width: 900px;
+            margin: 0 auto;
+            background: rgba(20, 20, 25, 0.98);
+            border: 1px solid rgba(255, 255, 255, 0.2);
+            border-radius: 10px;
+            padding: 2rem;
+            color: #d0d0d0;
+            position: relative;
+        }
+
+        .markdown-content h1, .markdown-content h2, .markdown-content h3 {
+            color: #8b9aff;
+            margin-top: 1.5rem;
+            margin-bottom: 1rem;
+        }
+
+        .markdown-content h1 {
+            font-size: 2rem;
+        }
+
+        .markdown-content h2 {
+            font-size: 1.5rem;
+        }
+
+        .markdown-content code {
+            background: rgba(139, 154, 255, 0.2);
+            padding: 0.2rem 0.4rem;
+            border-radius: 4px;
+            font-family: 'Courier New', monospace;
+        }
+
+        .markdown-content pre {
+            background: #1e1e1e;
+            padding: 1rem;
+            border-radius: 8px;
+            overflow-x: auto;
+            margin: 1rem 0;
+        }
+
+        .markdown-content pre code {
+            background: transparent;
+            padding: 0;
+        }
+
+        .markdown-content a {
+            color: #8b9aff;
+            text-decoration: underline;
+        }
+
+        .markdown-content ul, .markdown-content ol {
+            margin-left: 2rem;
+            margin-bottom: 1rem;
+        }
+
+        .markdown-close {
+            position: absolute;
+            top: 1rem;
+            right: 1rem;
+            background: rgba(139, 154, 255, 0.2);
+            border: 1px solid rgba(139, 154, 255, 0.4);
+            color: #8b9aff;
+            border-radius: 5px;
+            padding: 0.5rem 1rem;
+            cursor: pointer;
+            font-size: 1rem;
+        }
+
+        .markdown-close:hover {
+            background: rgba(139, 154, 255, 0.3);
+        }
+
+        @media (max-width: 768px) {
+            h1 {
+                font-size: 2.5rem;
+            }
+            .tagline {
+                font-size: 1.2rem;
+            }
+            .subtitle {
+                font-size: 0.9rem;
+            }
+            .main-content {
+                padding: 1.5rem;
+            }
+            .markdown-modal {
+                padding: 1rem;
+            }
+            .markdown-content {
+                padding: 1.5rem;
+            }
+            .github-link {
+                position: relative;
+                top: auto;
+                right: auto;
+                display: inline-flex;
+                margin-bottom: 1rem;
+            }
+        }
+    </style>
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+</head>
+<body>
+    <div class="container">
+        <header>
+            <a href="https://github.com/modularizer/rtchat" target="_blank" rel="noopener noreferrer" class="github-link">
+                <svg viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+                    <path d="M12 0c-6.626 0-12 5.373-12 12 0 5.302 3.438 9.8 8.207 11.387.599.111.793-.261.793-.577v-2.234c-3.338.726-4.033-1.416-4.033-1.416-.546-1.387-1.333-1.756-1.333-1.756-1.089-.745.083-.729.083-.729 1.205.084 1.839 1.237 1.839 1.237 1.07 1.834 2.807 1.304 3.492.997.107-.775.418-1.305.762-1.604-2.665-.305-5.467-1.334-5.467-5.931 0-1.311.469-2.381 1.236-3.221-.124-.303-.535-1.524.117-3.176 0 0 1.008-.322 3.301 1.23.957-.266 1.983-.399 3.003-.404 1.02.005 2.047.138 3.006.404 2.291-1.552 3.297-1.23 3.297-1.23.653 1.653.242 2.874.118 3.176.77.84 1.235 1.911 1.235 3.221 0 4.609-2.807 5.624-5.479 5.921.43.372.823 1.102.823 2.222v3.293c0 .319.192.694.801.576 4.765-1.589 8.199-6.086 8.199-11.386 0-6.627-5.373-12-12-12z"/>
+                </svg>
+                <span>GitHub</span>
+            </a>
+            <h1>RTChat</h1>
+            <p class="tagline">Serverless Peer-to-Peer Chat with Audio & Video Calls</p>
+            <p class="subtitle">Using Public MQTT & STUN servers and Peer-to-Peer WebRTC</p>
+        </header>
+
+        <div class="main-content">
+            <div class="security-warning">
+                <h3>⚠️ Security Note</h3>
+                <p>RTChat prioritizes ease-of-use over metadata privacy. The connection process exposes your IP address, display name, and room names over public MQTT. Actual chats are end-to-end encrypted. See <a href="./SECURITY.md" style="color: #8b9aff; text-decoration: underline;">SECURITY.md</a> for details.</p>
+            </div>
+
+            <h2>What is RTChat?</h2>
+            <p>
+                RTChat is a <span class="highlight">serverless</span> peer-to-peer communication library that enables 
+                real-time chat, audio, and video calls without requiring your own backend infrastructure. 
+                It uses WebRTC for direct peer-to-peer connections and MQTT only for initial signaling 
+                (discovering other users), making it incredibly lightweight and efficient.
+            </p>
+
+            <p>
+                Once peers discover each other via MQTT, all communication happens directly between browsers 
+                using WebRTC. This means <strong>no server costs</strong>, <strong>no data storage</strong>, 
+                and <strong>end-to-end encrypted</strong> connections by default.
+            </p>
+
+            <p style="background: rgba(139, 154, 255, 0.1); padding: 1rem; border-radius: 8px; border-left: 3px solid #8b9aff; margin: 1.5rem 0;">
+                <strong>💡 Bring Your Own UI:</strong> The built-in chat widget is intentionally basic and functional, not beautiful. 
+                RTChat is designed as a <strong>library, not a complete UI</strong> - build your own interface using React, Vue, 
+                vanilla JS, or any framework. See the <a href="./CUSTOM_UI_GUIDE.md" style="color: #8b9aff; text-decoration: underline;">Custom UI Guide</a> to get started.
+            </p>
+
+            <div class="feature-grid">
+                <div class="feature-card">
+                    <h3>🚀 Serverless</h3>
+                    <p>No backend required. Uses public MQTT brokers and STUN servers only for initial signaling (~3kB per connection).</p>
+                </div>
+                <div class="feature-card">
+                    <h3>💬 Real-time Chat</h3>
+                    <p>Instant messaging with support for direct messages, group chats, and custom message types.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>📹 Video & Audio</h3>
+                    <p>Built-in support for peer-to-peer video and audio calls with WebRTC media streams.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>🔒 Secure</h3>
+                    <p>End-to-end encrypted connections with optional RSA-PSS identity verification.</p>
+                </div>
+                <div class="feature-card" style="border-left-color: #ff8888;">
+                    <h3 style="color: #ff8888;">⚠️ Exposes Metadata</h3>
+                    <p>Including IP addresses, room names, and user display names over public MQTT channels to facilitate a serverless design.</p>
+                </div>
+                <div class="feature-card">
+                    <h3>⚡ Cross-platform</h3>
+                    <p>Works in browsers, Node.js, React, Vue, Angular, Svelte, or any JavaScript environment. Zero external runtime dependencies - lightweight and easy to integrate.</p>
+                </div>
+            </div>
+
+            <h2>Quick Start</h2>
+            <p>Get started with RTChat in just a few lines of code:</p>
+
+            <div class="code-block">
+<code><span class="keyword">import</span> { MQTTRTCClient } <span class="keyword">from</span> <span class="string">'@rtchat/core'</span>;
+
+<span class="keyword">const</span> client = <span class="keyword">new</span> <span class="function">MQTTRTCClient</span>({
+  name: <span class="string">'MyName'</span>,
+  topic: { room: <span class="string">'myroom'</span> }
+});
+
+<span class="comment">// Listen for peer connections</span>
+client.<span class="function">on</span>(<span class="string">'connectedtopeer'</span>, (user) => {
+  console.<span class="function">log</span>(<span class="string">'Connected to'</span>, user);
+});
+
+<span class="comment">// Listen for chat messages</span>
+client.<span class="function">on</span>(<span class="string">'chat'</span>, (message, sender) => {
+  console.<span class="function">log</span>(<span class="string">`${sender}: ${message}`</span>);
+});
+
+<span class="comment">// Send a message to all connected peers</span>
+client.<span class="function">sendRTCChat</span>(<span class="string">'Hello everyone!'</span>);</code>
+            </div>
+
+            <h2>Video & Audio Calls</h2>
+            <p>
+                RTChat includes built-in support for peer-to-peer video and audio calls. 
+                Make calls directly between browsers without any server in the middle:
+            </p>
+
+            <div class="code-block">
+<code><span class="comment">// Make a video call</span>
+<span class="keyword">const</span> { start, end } = client.<span class="function">callUser</span>(<span class="string">'PeerName'</span>, {
+  video: <span class="keyword">true</span>,
+  audio: <span class="keyword">true</span>
+});
+
+start.<span class="function">then</span>(({ localStream, remoteStream }) => {
+  <span class="comment">// Display streams in video elements</span>
+  localVideo.srcObject = localStream;
+  remoteVideo.srcObject = remoteStream;
+});
+
+<span class="comment">// Handle incoming calls</span>
+client.<span class="function">on</span>(<span class="string">'call'</span>, (peerName, callInfo, promises) => {
+  <span class="keyword">if</span> (<span class="function">confirm</span>(<span class="string">`Accept call from ${peerName}?`</span>)) {
+    <span class="keyword">return</span> promises.start.<span class="function">then</span>(({ localStream, remoteStream }) => {
+      localVideo.srcObject = localStream;
+      remoteVideo.srcObject = remoteStream;
+    });
+  }
+});</code>
+            </div>
+
+            <h2>How It Works</h2>
+            <p>
+                RTChat uses a two-phase connection process:
+            </p>
+            <ol style="margin-left: 2rem; margin-bottom: 1.5rem; color: #d0d0d0;">
+                <li style="margin-bottom: 0.5rem;"><strong>Discovery Phase:</strong> Peers connect to a public MQTT broker and announce their presence on a shared topic (room).</li>
+                <li style="margin-bottom: 0.5rem;"><strong>Direct Connection:</strong> Once peers discover each other, they establish a direct WebRTC connection. All subsequent communication happens peer-to-peer.</li>
+            </ol>
+            <p>
+                This architecture means MQTT is only used briefly for signaling (~3kB per connection), 
+                and all actual data (messages, video, audio) flows directly between peers with no server in between.
+            </p>
+
+            <div class="demo-section">
+                <h2>Try It Out</h2>
+                <p>
+                    Want to see RTChat in action? The chat widget below is a live demo. 
+                    Open this page in multiple tabs or share it with a friend to start chatting!
+                </p>
+                <p style="font-size: 0.9rem; color: #999; margin-top: 1rem; font-style: italic;">
+                    <strong>Note:</strong> The built-in UI is intentionally basic - that's the point! RTChat is designed for you to build your own UI. The chat widget will appear in the bottom-right corner of this page.
+                </p>
+            </div>
+
+            <div class="cta-section">
+                <h2>Ready to Build?</h2>
+                <p style="margin-bottom: 1.5rem;">Check out our comprehensive documentation to get started:</p>
+                <a href="./CUSTOM_UI_GUIDE.md" class="button" data-markdown-link>Custom UI Guide</a>
+                <a href="./RTC_GUIDE.md" class="button" data-markdown-link>RTC Protocol Guide</a>
+                <a href="./README.md" class="button" data-markdown-link>Full Documentation</a>
+                <a href="./SECURITY.md" class="button" data-markdown-link>Security Assessment</a>
+            </div>
+        </div>
+    </div>
+
+    <!-- Markdown Viewer Modal -->
+    <div id="markdown-modal" class="markdown-modal">
+        <div class="markdown-content">
+            <button class="markdown-close" onclick="closeMarkdown()">Close</button>
+            <div id="markdown-render"></div>
+        </div>
+    </div>
+
+    <script>
+        // Handle markdown link clicks
+        document.addEventListener('DOMContentLoaded', () => {
+            document.querySelectorAll('[data-markdown-link]').forEach(link => {
+                link.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    const url = link.getAttribute('href');
+                    loadMarkdown(url);
+                });
+            });
+
+            // Close modal on background click
+            document.getElementById('markdown-modal').addEventListener('click', (e) => {
+                if (e.target.id === 'markdown-modal') {
+                    closeMarkdown();
+                }
+            });
+
+            // Close modal on Escape key
+            document.addEventListener('keydown', (e) => {
+                if (e.key === 'Escape') {
+                    closeMarkdown();
+                }
+            });
+        });
+
+        async function loadMarkdown(url) {
+            const modal = document.getElementById('markdown-modal');
+            const render = document.getElementById('markdown-render');
+            
+            modal.classList.add('active');
+            render.innerHTML = '<p style="text-align: center; color: #8b9aff;">Loading...</p>';
+            
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error('Failed to load');
+                const markdown = await response.text();
+                render.innerHTML = marked.parse(markdown);
+            } catch (error) {
+                render.innerHTML = `<p style="color: #ff8888;">Error loading markdown file: ${error.message}</p>`;
+            }
+        }
+
+        function closeMarkdown() {
+            document.getElementById('markdown-modal').classList.remove('active');
+        }
+    </script>
+
+    <!-- Load RTChat -->
+    <script type="module" src="./src/adapters/vanilla/rtchat.js?add=true"></script>
+</body>
+</html>

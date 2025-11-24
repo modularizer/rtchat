@@ -68,6 +68,7 @@ class ChatBox extends HTMLElement {
           background-color: #f9f9f9;
           border-radius: 10px;
           min-width: 350px;
+          z-index: 9999;
         }
         #chat-header {
           cursor: pointer;
