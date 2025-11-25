@@ -74,14 +74,14 @@ export function getDefaults() {
        * - How long to wait before attempting to reconnect to MQTT broker
        * - Used when connection is lost
        */
-      reconnectPeriod: 1000,
+      reconnectPeriod: 500,
       
       /**
        * Connection timeout in milliseconds
        * - Maximum time to wait for MQTT connection to establish
        * - Throws error if connection not established within this time
        */
-      connectTimeout: 30000
+      connectTimeout: 10000
     },
     
     // ============================================================================
@@ -138,7 +138,7 @@ export function getDefaults() {
        * - Default: 12000ms (12 seconds)
        * - Recommended range: 3000-15000ms
        */
-      waitForAnswerTimeout: 3000
+      waitForAnswerTimeout: 1100
     },
     
     // ============================================================================

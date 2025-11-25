@@ -308,41 +308,81 @@ class BaseMQTTRTCClient extends EventEmitter {
             let payload;
             let payloadString;
             
+            // Add initial validation for payloadData
+            if (payloadData === null || payloadData === undefined) {
+                console.error("Received null or undefined MQTT message data");
+                return;
+            }
+            
             try{
                 // Try decompression first with original data format (might be Uint8Array)
                 const decompressed = this.mqttLoader.decompress(payloadData);
+                
+                // Check if decompression returned null/undefined
+                if (decompressed === null || decompressed === undefined) {
+                    console.error("Decompression returned null/undefined for data:", payloadData);
+                    return;
+                }
                 
                 // Convert decompressed data to string if it's not already
                 if (typeof decompressed === 'string') {
                     payloadString = decompressed;
                 } else if (decompressed instanceof Uint8Array) {
                     payloadString = new TextDecoder().decode(decompressed);
-                } else if (decompressed !== null && typeof decompressed === 'object') {
+                } else if (typeof decompressed === 'object') {
                     // Already an object (decompression returned parsed JSON)
                     payload = decompressed;
                 } else {
-                    payloadString = decompressed.toString();
+                    payloadString = String(decompressed);
                 }
                 
                 // Parse JSON if we got a string
                 if (!payload && payloadString) {
-                    payload = JSON.parse(payloadString);
+                    try {
+                        payload = JSON.parse(payloadString);
+                    } catch (jsonError) {
+                        console.error("Failed to parse JSON from decompressed string:", jsonError, "String:", payloadString);
+                        return;
+                    }
                 }
             }catch(e){
                 // Fallback: convert to string and try to parse
+                console.warn("Decompression failed, attempting fallback parsing:", e.message);
                 try {
                     if (payloadData instanceof Uint8Array) {
                         payloadString = new TextDecoder().decode(payloadData);
                     } else if (typeof payloadData !== 'string') {
-                        payloadString = payloadData.toString();
+                        payloadString = String(payloadData);
                     } else {
                         payloadString = payloadData;
                     }
+                    
+                    if (!payloadString) {
+                        console.error("Converted payload string is empty");
+                        return;
+                    }
+                    
                     payload = JSON.parse(payloadString);
                 } catch (parseError) {
-                    console.error("Failed to parse MQTT message:", parseError, "Raw data:", payloadData);
+                    console.error("Failed to parse MQTT message:", parseError, "Raw data:", payloadData, "String:", payloadString);
                     return;
                 }
+            }
+            
+            // Validate payload structure
+            if (!payload || typeof payload !== 'object') {
+                console.error("Invalid payload: not an object", 
+                    "Payload:", payload, 
+                    "Type:", typeof payload,
+                    "Original data:", payloadData);
+                return;
+            }
+            
+            if (!payload.sender) {
+                console.error("Invalid payload: missing sender property", 
+                    "Payload:", payload,
+                    "Keys:", Object.keys(payload));
+                return;
             }
             
             if (payload.sender === this.name){
