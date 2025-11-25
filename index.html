@@ -200,6 +200,8 @@
         .function { color: #dcdcaa; }
         .comment { color: #6a9955; }
         .number { color: #b5cea8; }
+        .tag { color: #569cd6; }
+        .attr { color: #9cdcfe; }
 
         .highlight {
             background: rgba(139, 154, 255, 0.2);
@@ -467,8 +469,39 @@
                 </div>
             </div>
 
+            <h2>HTML Quick Start</h2>
+            <p>Add RTChat to your HTML page with a single script tag:</p>
+
+            <div class="code-block"><span class="tag">&lt;script</span> <span class="attr">src</span>=<span class="string">"https://modularizer.github.io/rtchat/bundles/rtchat.min.js?add=true"</span><span class="tag">&gt;&lt;/script&gt;</span></div>
+
+            <p style="margin-top: 1rem; color: #b0b0b0; font-size: 0.95rem;">
+                That's it! A chat widget will automatically appear on your page. Open the page in multiple tabs or share it with others to start chatting.
+            </p>
+
+            <p style="margin-top: 1rem; color: #b0b0b0; font-size: 0.95rem;">
+                <strong>Optional parameters:</strong> <code>showRoom</code> (show/hide room name, default: <code>true</code>), <code>editableRoom</code> (allow editing room name, default: <code>true</code>), <code>defaultRoom</code> (set initial room/topic name)
+            </p>
+
+            <p style="margin-top: 1rem; color: #b0b0b0; font-size: 0.95rem;">
+                <strong>Accessing the RTC client:</strong> The script exposes <code>window.rtc</code> (the active RTC client instance), <code>window.RTChat</code> (the RTChat class), and <code>window.SignedMQTTRTCClient</code> (the SignedMQTTRTCClient class). You can access them in your JavaScript:
+            </p>
+            <div class="code-block" style="margin-top: 0.5rem;">
+<code><span class="tag">&lt;script</span><span class="tag">&gt;</span>
+  <span class="comment">// Wait for the widget to load, then access the RTC client</span>
+  <span class="function">window</span>.<span class="function">addEventListener</span>(<span class="string">'load'</span>, () => {
+    <span class="keyword">if</span> (<span class="function">window</span>.<span class="keyword">rtc</span>) {
+      console.<span class="function">log</span>(<span class="string">'Connected as:'</span>, <span class="function">window</span>.<span class="keyword">rtc</span>.<span class="keyword">name</span>);
+      <span class="comment">// Listen for chat messages</span>
+      <span class="function">window</span>.<span class="keyword">rtc</span>.<span class="function">on</span>(<span class="string">'chat'</span>, (message, sender) => {
+        console.<span class="function">log</span>(<span class="string">`${sender}: ${message}`</span>);
+      });
+    }
+  });
+<span class="tag">&lt;/script&gt;</span></code>
+            </div>
+
             <h2>Quick Start</h2>
-            <p>Get started with RTChat in just a few lines of code:</p>
+            <p>Get started with RTChat programmatically in just a few lines of code:</p>
 
             <div class="code-block">
 <code><span class="keyword">import</span> { MQTTRTCClient } <span class="keyword">from</span> <span class="string">'@rtchat/core'</span>;
@@ -614,6 +647,7 @@ client.<span class="function">on</span>(<span class="string">'call'</span>, (pee
     </script>
 
     <!-- Load RTChat -->
+<!--    <script src="./bundles/rtchat.min.js?add=true"></script>-->
     <script type="module" src="./src/adapters/vanilla/rtchat.js?add=true"></script>
 </body>
 </html>

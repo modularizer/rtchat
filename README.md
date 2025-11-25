@@ -31,6 +31,39 @@ npm install @rtchat/core
 
 ## Quick Start
 
+### HTML Quick Start (Single Script Tag)
+
+Add RTChat to your HTML page with a single script tag:
+
+```html
+<!-- Basic usage -->
+<script src="https://modularizer.github.io/rtchat/bundles/rtchat.min.js?add=true"></script>
+
+<!-- With custom options: showRoom, editableRoom, defaultRoom -->
+<!-- <script src="https://modularizer.github.io/rtchat/bundles/rtchat.min.js?add=true&showRoom=false&defaultRoom=myroom"></script> -->
+```
+
+That's it! A chat widget will automatically appear on your page. Open the page in multiple tabs or share it with others to start chatting.
+
+**Optional parameters:** `showRoom` (show/hide room name, default: `true`), `editableRoom` (allow editing room name, default: `true`), `defaultRoom` (set initial room/topic name)
+
+**Accessing the RTC client:** The script exposes `window.rtc` (the active RTC client instance), `window.RTChat` (the RTChat class), and `window.SignedMQTTRTCClient` (the SignedMQTTRTCClient class). You can access them in your JavaScript:
+
+```html
+<script>
+  // Wait for the widget to load, then access the RTC client
+  window.addEventListener('load', () => {
+    if (window.rtc) {
+      console.log('Connected as:', window.rtc.name);
+      // Listen for chat messages
+      window.rtc.on('chat', (message, sender) => {
+        console.log(`${sender}: ${message}`);
+      });
+    }
+  });
+</script>
+```
+
 ### npm Package (Recommended)
 
 ```javascript

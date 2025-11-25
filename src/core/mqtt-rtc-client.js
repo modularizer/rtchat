@@ -233,10 +233,13 @@ class BaseMQTTRTCClient extends EventEmitter {
           // This reduces unnecessary connect messages when already connected
           const hasActiveConnections = Object.keys(this.rtcConnections).some(user => {
             const conn = this.rtcConnections[user];
-            return conn && conn.peerConnection.connectionState === "connected";
+            return conn && conn.peerConnection && 
+                   (conn.peerConnection.connectionState === "connected" || 
+                    conn.peerConnection.connectionState === "completed");
           });
           
-          if (!hasActiveConnections || announcementCount < 5) {
+          // Only announce if no active connections (removed the "announcementCount < 5" condition)
+          if (!hasActiveConnections) {
             this.postPubliclyToMQTTServer("connect", this.userInfo);
           }
           
@@ -248,7 +251,9 @@ class BaseMQTTRTCClient extends EventEmitter {
             this.announceInterval = setInterval(() => {
               const hasActiveConnections = Object.keys(this.rtcConnections).some(user => {
                 const conn = this.rtcConnections[user];
-                return conn && conn.peerConnection.connectionState === "connected";
+                return conn && conn.peerConnection && 
+                       (conn.peerConnection.connectionState === "connected" || 
+                        conn.peerConnection.connectionState === "completed");
               });
               if (!hasActiveConnections) {
                 this.postPubliclyToMQTTServer("connect", this.userInfo);
@@ -288,7 +293,7 @@ class BaseMQTTRTCClient extends EventEmitter {
             while (this.mqttHistory.length > this.maxHistoryLength){
                 this.mqttHistory.shift();
             }
-            console.log("Received MQTT message on " + this.topic  + " subtopic " + subtopic + " from " + payload.sender, payload.data);
+            // Log removed to reduce console noise
             if (this.mqttHandlers[subtopic]){
                 this.mqttHandlers[subtopic](payload);
             }else{
@@ -363,7 +368,7 @@ class BaseMQTTRTCClient extends EventEmitter {
   //____________________________________________________________________________________________________________________
   mqttHandlers = {
     connect: payload => {//connection
-        console.log("Received notice that someone else connected:" + payload.sender, payload, payload.data);
+        // Log removed to reduce console noise
         
         // Check if we're already connected and the connection is healthy
         const existingConnection = this.rtcConnections[payload.sender];
@@ -374,7 +379,7 @@ class BaseMQTTRTCClient extends EventEmitter {
             // If connection is healthy, ignore this connect message (likely a periodic announcement)
             if (connectionState === "connected" && 
                 (iceConnectionState === "connected" || iceConnectionState === "completed")) {
-                console.log("Already connected to " + payload.sender + ", ignoring connect message");
+                // Log removed to reduce console noise
                 this.knownUsers[payload.sender] = payload.data; // Update user info
                 return;
             }
@@ -384,11 +389,35 @@ class BaseMQTTRTCClient extends EventEmitter {
                 iceConnectionState === "failed" || iceConnectionState === "closed") {
                 console.warn("Connection to " + payload.sender + " is broken, disconnecting");
                 this.disconnectFromUser(payload.sender);
-            } else {
-                // Connection is in progress (connecting, etc.), don't interfere
-                console.log("Connection to " + payload.sender + " is in progress (" + connectionState + "), ignoring");
+            } else if (connectionState === "new") {
+                // Connection is in "new" state - check if it's been stuck for too long
+                // If it's been more than 10 seconds, allow a retry
+                const connectionAge = Date.now() - (existingConnection.createdAt || 0);
+                if (connectionAge > 10000) {
+                    console.warn("Connection to " + payload.sender + " stuck in 'new' state for " + connectionAge + "ms, allowing retry");
+                    this.disconnectFromUser(payload.sender);
+                    // Fall through to create new connection
+                } else {
+                    // Connection is new but not stuck yet, don't interfere
+                    this.knownUsers[payload.sender] = payload.data; // Update user info
+                    return;
+                }
+            } else if (connectionState === "connecting") {
+                // Connection is actively connecting, don't interfere
                 this.knownUsers[payload.sender] = payload.data; // Update user info
                 return;
+            } else {
+                // Other states (checking, etc.), allow retry if stuck
+                const connectionAge = Date.now() - (existingConnection.createdAt || 0);
+                if (connectionAge > 15000) {
+                    console.warn("Connection to " + payload.sender + " stuck in '" + connectionState + "' state for " + connectionAge + "ms, allowing retry");
+                    this.disconnectFromUser(payload.sender);
+                    // Fall through to create new connection
+                } else {
+                    // Connection is progressing, don't interfere
+                    this.knownUsers[payload.sender] = payload.data; // Update user info
+                    return;
+                }
             }
         }
         
@@ -487,16 +516,22 @@ class BaseMQTTRTCClient extends EventEmitter {
         return navigator.mediaDevices.getUserMedia(callInfo)
     }else{
         return this.acceptCallFromUser(user, callInfo, promises).then(r=> {
-            if (r){
-                return navigator.mediaDevices.getUserMedia(callInfo)
-            }else{
+            if (r === false || r === null || r === undefined){
                 return Promise.reject("Call rejected");
             }
+            // If acceptCallFromUser returns modified callInfo (object), use it
+            // Otherwise use the original callInfo
+            const mediaCallInfo = (typeof r === 'object' && r !== null && (r.video !== undefined || r.audio !== undefined)) 
+                ? r 
+                : callInfo;
+            return navigator.mediaDevices.getUserMedia(mediaCallInfo)
         })
     }
   }
   oncallended(user){
     console.log("Call ended with " + user);
+    // Emit the callended event so UI components can react
+    this.emit('callended', user);
   }
   acceptCallFromUser(user, callInfo, promises){
      return Promise.resolve(true);
@@ -673,6 +708,7 @@ class RTCConnection {
         this.target = target;
         this.mqttClient = mqttClient;
         this.dataChannels = {};
+        this.createdAt = Date.now(); // Track when connection was created
         this.peerConnection = new RTCPeerConnection(this.rtcConfiguration);
         this.peerConnection.onicecandidate = this.onicecandidate.bind(this);
 
@@ -862,7 +898,9 @@ class RTCConnection {
         if (channel === "streamoffer"){
             console.log("received stream offer", event.data)
             let {offer, streamInfo} = JSON.parse(event.data);
-            this.mqttClient.callFromUser(this.target, {video: true, audio: true}, this.initiatedCall, this.callPromises).then(stream => {
+            // Use streamInfo from the offer if available, otherwise default to video+audio
+            const callInfo = streamInfo || {video: true, audio: true};
+            this.mqttClient.callFromUser(this.target, callInfo, this.initiatedCall, this.callPromises).then(stream => {
                 if (!this.streamConnection){
                     this.streamConnection = this._makeStreamConnection(stream);
                 }

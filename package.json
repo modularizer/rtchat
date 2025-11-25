@@ -46,9 +46,11 @@
   ],
   "scripts": {
     "build": "rollup -c",
+    "build:bundles": "rollup -c rollup.config.bundles.js",
+    "build:all": "npm run build && npm run build:bundles",
     "dev": "rollup -c -w",
     "type-check": "tsc --noEmit",
-    "prepublishOnly": "npm run build",
+    "prepublishOnly": "npm run build:all",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "keywords": [

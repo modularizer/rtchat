@@ -1,2 +1,7 @@
 .idea
 venv/
+node_modules/
+dist/
+# bundles/ - NOT ignored so they can be committed for GitHub Pages hosting
+*.log
+.DS_Store

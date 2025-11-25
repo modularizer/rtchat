@@ -11,6 +11,10 @@
 // UI Components (require browser/DOM)
 export { ChatBox } from './chat-box.js';
 export { BasicVideoChat, RTCVideoChat } from './video-chat.js';
+export { VideoStreamDisplay } from './video-stream-display.js';
+export { AudioStreamDisplay } from './audio-stream-display.js';
+export { CallRinger } from './call-ringer.js';
+export { NotificationSound } from './notification-sound.js';
 
 // Vanilla adapter (combines core + UI)
 export { RTChat } from '../adapters/vanilla/rtchat.js';
