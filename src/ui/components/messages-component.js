@@ -185,6 +185,8 @@ class MessagesComponent extends UIComponentBase {
   }
 }
 
-customElements.define('messages-component', MessagesComponent);
+if (!customElements.get('messages-component')) {
+  customElements.define('messages-component', MessagesComponent);
+}
 export { MessagesComponent };
 

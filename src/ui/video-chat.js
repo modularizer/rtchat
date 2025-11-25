@@ -164,6 +164,8 @@ class BasicVideoChat extends VideoChatHTMLElementBase {
 
 }
 
-customElements.define('video-chat', BasicVideoChat);
+if (!customElements.get('video-chat')) {
+  customElements.define('video-chat', BasicVideoChat);
+}
 
 export { BasicVideoChat };

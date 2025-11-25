@@ -133,6 +133,8 @@ class ActiveUsersList extends ActiveUsersListHTMLElementBase {
   }
 }
 
-customElements.define('active-users-list', ActiveUsersList);
+if (!customElements.get('active-users-list')) {
+  customElements.define('active-users-list', ActiveUsersList);
+}
 export { ActiveUsersList };
 

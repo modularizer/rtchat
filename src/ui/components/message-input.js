@@ -165,6 +165,8 @@ class MessageInput extends UIComponentBase {
   // Call buttons are now in the call-management section, not in MessageInput
 }
 
-customElements.define('message-input', MessageInput);
+if (!customElements.get('message-input')) {
+  customElements.define('message-input', MessageInput);
+}
 export { MessageInput };
 

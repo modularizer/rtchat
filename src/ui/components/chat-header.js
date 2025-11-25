@@ -241,6 +241,8 @@ class ChatHeader extends UIComponentBase {
   }
 }
 
-customElements.define('chat-header', ChatHeader);
+if (!customElements.get('chat-header')) {
+  customElements.define('chat-header', ChatHeader);
+}
 export { ChatHeader };
 

@@ -460,7 +460,9 @@ window.SignedMQTTRTCClient = SignedMQTTRTCClient;
 // Store pending configs in an array - we'll match them to elements in connectedCallback
 const autoConfigPending = [];
 
-customElements.define('rtc-hat', RTChat);
+if (!customElements.get('rtc-hat')) {
+  customElements.define('rtc-hat', RTChat);
+}
 
 // Get script URL - works for both ES modules and IIFE bundles
 function getScriptUrl() {
