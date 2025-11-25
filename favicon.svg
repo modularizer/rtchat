@@ -1,0 +1,15 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 100 100">
+  <!-- Background circle -->
+  <circle cx="50" cy="50" r="48" fill="#8b9aff" stroke="#6070ff" stroke-width="2"/>
+  
+  <!-- Chat bubble -->
+  <path d="M20 32 Q20 20 32 20 L68 20 Q80 20 80 32 L80 58 Q80 70 68 70 L40 70 L28 82 L28 70 Q20 70 20 58 Z" 
+        fill="white" stroke="none"/>
+  
+  <!-- Smiley face -->
+  <circle cx="40" cy="40" r="7" fill="#8b9aff" stroke="#6070ff" stroke-width="2"/>
+  <circle cx="60" cy="40" r="6" fill="#8b9aff" stroke="#6070ff" stroke-width="2"/>
+  <line x1="48" y1="55" x2="60" y2="55" stroke="#6070ff" stroke-width="6" stroke-linecap="round"  />
+  <line x1="48" y1="55" x2="60" y2="55" stroke="#8b9aff" stroke-width="4" stroke-linecap="round"  />
+</svg>
+
