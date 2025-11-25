@@ -138,7 +138,7 @@ export function getDefaults() {
        * - Default: 12000ms (12 seconds)
        * - Recommended range: 3000-15000ms
        */
-      waitForAnswerTimeout: 1000
+      waitForAnswerTimeout: 3000
     },
     
     // ============================================================================
