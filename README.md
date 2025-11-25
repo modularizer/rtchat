@@ -80,6 +80,28 @@ client.on('chat', (message, sender) => {
 });
 ```
 
+### ES Module CDN Import
+
+For modern module-based projects, use the ESM bundle:
+
+```javascript
+import { RTChat, SignedMQTTRTCClient, MQTTRTCClient } from 'https://modularizer.github.io/rtchat/bundles/rtchat.esm.min.js';
+
+const rtchat = new RTChat({
+  topic: 'myroom',
+  trustMode: 'moderate'
+});
+document.body.appendChild(rtchat);
+```
+
+Available bundles:
+- **`rtchat.esm.min.js`** - Full ESM bundle (minified) - **Recommended for ES modules**
+- **`rtchat.esm.js`** - Full ESM bundle (unminified, with sourcemap)
+- **`rtchat.min.js`** - Full IIFE bundle (minified) - For script tags
+- **`rtchat.js`** - Full IIFE bundle (unminified, with sourcemap)
+- **`rtchat-core.esm.min.js`** - Core only (no UI)
+- **`rtchat-ui.esm.min.js`** - UI components only
+
 ### CDN / HTML (Legacy)
 ```html
 <script src="https://modularizer.github.io/rtchat/bundles/rtchat.min.js?add"></script>
