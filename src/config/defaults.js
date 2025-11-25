@@ -44,8 +44,9 @@ export function getDefaults() {
        * - Default: Public cloud.shiftr.io broker (no auth required)
        * - Only used briefly for signaling, then direct WebRTC takes over
        */
-      broker: 'wss://public:public@public.cloud.shiftr.io',
-      
+      broker: 'wss://broker.emqx.io:8084/mqtt',
+      // broker: 'wss://public:public@public.cloud.shiftr.io',
+
       /**
        * MQTT client ID
        * - Unique identifier for this MQTT connection

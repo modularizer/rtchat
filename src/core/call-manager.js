@@ -192,6 +192,11 @@ class CallManager extends EventEmitter {
     
     if (shouldAutoAccept) {
       console.log(`Auto-accepting incoming call from ${peerName} (already in group call)`);
+      const autoPending = this.pendingCalls.get(peerName);
+      if (autoPending && autoPending.timeoutId) {
+        clearTimeout(autoPending.timeoutId);
+        autoPending.timeoutId = null;
+      }
       return Promise.resolve(true);
     }
     
@@ -238,13 +243,20 @@ class CallManager extends EventEmitter {
    * @private
    */
   _handleCallConnected(sender, {localStream, remoteStream}) {
-    // Clear timeout
+    // Clear pending-call timeout (incoming)
     const pendingCall = this.pendingCalls.get(sender);
     if (pendingCall && pendingCall.timeoutId) {
       clearTimeout(pendingCall.timeoutId);
       pendingCall.timeoutId = null;
     }
     this.pendingCalls.delete(sender);
+
+    // Clear outgoing-call timeout (our dial)
+    const outgoingCall = this.outgoingCalls.get(sender);
+    if (outgoingCall && outgoingCall.timeoutId) {
+      clearTimeout(outgoingCall.timeoutId);
+    }
+    this.outgoingCalls.delete(sender);
     
     // Stop ringing if ringer is provided
     if (this.ringer && typeof this.ringer.stop === 'function') {

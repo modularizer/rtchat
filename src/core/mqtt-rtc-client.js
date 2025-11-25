@@ -162,13 +162,9 @@ class BaseMQTTRTCClient extends EventEmitter {
     this.pendingIceCandidates = {};
     this.maxConnectRetries = configObj.webrtc?.maxConnectRetries || 3;
     this.connectRetryDelay = configObj.webrtc?.connectRetryDelay || 4000;
-    this.connectionMaintenanceInterval = null;
-    this.connectionMaintenanceIntervalMs = configObj.webrtc?.connectionMaintenanceIntervalMs || 5000;
     this.waitForAnswerTimeout = configObj.webrtc?.waitForAnswerTimeout || 12000;
     this.connectingUsers = new Set();
-    this._startConnectionMaintenance = this._startConnectionMaintenance.bind(this);
-    this._maintainPeerConnections = this._maintainPeerConnections.bind(this);
-    this._attemptConnection = this._attemptConnection.bind(this);
+    this.attemptedPeers = new Set();
     this.maxConnectRetries = configObj.webrtc?.maxConnectRetries || 3;
     this.connectRetryDelay = configObj.webrtc?.connectRetryDelay || 4000;
 
@@ -226,14 +222,18 @@ class BaseMQTTRTCClient extends EventEmitter {
     }
   }
   _onMQTTConnect(){
+    console.log(`MQTT transport connected, subscribing to ${this.topic} as ${this.name}`);
     this.client.subscribe(this.topic, ((err)=>{
     if (!err) {
         console.log("subscribed to ", this.topic);
         // Send initial connect message immediately after subscription is confirmed
         // This ensures we announce our presence as soon as we're ready to receive messages
-        this.postPubliclyToMQTTServer("connect", this.userInfo);
-        this.onConnectedToMQTT();
-        this._startConnectionMaintenance();
+        console.log(`MQTT subscribed to ${this.topic}, listening for presence as ${this.name}`);
+        setTimeout(() => {
+          console.log(`MQTT connect: announcing presence as ${this.name} in ${this.topic}`);
+          this.postPubliclyToMQTTServer("connect", this.userInfo);
+          this.onConnectedToMQTT();
+        }, 500);
         
         // Also set up periodic announcements to catch any missed connections
         // This handles race conditions when two users connect simultaneously
@@ -395,6 +395,7 @@ class BaseMQTTRTCClient extends EventEmitter {
     connect: payload => {//connection
         // Log removed to reduce console noise
         
+        console.log(`MQTT connect message received from ${payload.sender}, initiating WebRTC signaling flow`);
         // Check if we're already connected and the connection is healthy
         const existingConnection = this.rtcConnections[payload.sender];
         if (existingConnection) {
@@ -409,16 +410,17 @@ class BaseMQTTRTCClient extends EventEmitter {
                 return;
             }
             
+            const weShouldInitiate = this._shouldInitiateConnection(payload.sender);
             // Connection exists but is broken, disconnect it
-            if (connectionState === "failed" || connectionState === "closed" ||
-                iceConnectionState === "failed" || iceConnectionState === "closed") {
+            if (weShouldInitiate && (connectionState === "failed" || connectionState === "closed" ||
+                iceConnectionState === "failed" || iceConnectionState === "closed")) {
                 console.warn("Connection to " + payload.sender + " is broken, disconnecting");
                 this.disconnectFromUser(payload.sender);
             } else if (connectionState === "new") {
                 // Connection is in "new" state - check if it's been stuck for too long
                 // If it's been more than 10 seconds, allow a retry
                 const connectionAge = Date.now() - (existingConnection.createdAt || 0);
-                if (connectionAge > 10000) {
+                if (weShouldInitiate && connectionAge > 10000) {
                     console.warn("Connection to " + payload.sender + " stuck in 'new' state for " + connectionAge + "ms, allowing retry");
                     this.disconnectFromUser(payload.sender);
                     // Fall through to create new connection
@@ -434,7 +436,7 @@ class BaseMQTTRTCClient extends EventEmitter {
             } else {
                 // Other states (checking, etc.), allow retry if stuck
                 const connectionAge = Date.now() - (existingConnection.createdAt || 0);
-                if (connectionAge > 15000) {
+                if (weShouldInitiate && connectionAge > 15000) {
                     console.warn("Connection to " + payload.sender + " stuck in '" + connectionState + "' state for " + connectionAge + "ms, allowing retry");
                     this.disconnectFromUser(payload.sender);
                     // Fall through to create new connection
@@ -447,10 +449,25 @@ class BaseMQTTRTCClient extends EventEmitter {
         }
         
         this.knownUsers[payload.sender] = payload.data;
-        this.shouldConnectToUser(payload.sender, payload.data).then(r => {
-            if (r){
-                this._attemptConnection(payload.sender);
+        this.shouldConnectToUser(payload.sender, payload.data).then(shouldConnect => {
+            if (!shouldConnect){
+                return;
             }
+            if (!this._shouldInitiateConnection(payload.sender)) {
+                console.log("connect: Waiting for peer " + payload.sender + " to initiate connection");
+                return;
+            }
+            if (this.connectionToUser(payload.sender)) {
+                console.log("connect: Already connected or connecting to " + payload.sender);
+                return;
+            }
+            if (this.attemptedPeers.has(payload.sender)) {
+                console.log("connect: Already attempted connection to " + payload.sender);
+                return;
+            }
+            this.attemptedPeers.add(payload.sender);
+            setTimeout(() => this.attemptedPeers.delete(payload.sender), this.waitForAnswerTimeout);
+            this.connectToUser(payload.sender);
         })
     },
     nameChange: payload => {//name
@@ -574,51 +591,33 @@ class BaseMQTTRTCClient extends EventEmitter {
   acceptCallFromUser(user, callInfo, promises){
      return Promise.resolve(true);
   }
-  connectToUser(user, attempt = 1){
-    const existingConnection = this.rtcConnections[user];
-    if (existingConnection){
-        const pc = existingConnection.peerConnection;
-        const connectionState = pc?.connectionState;
-        const iceState = pc?.iceConnectionState;
-        const connectionAge = Date.now() - (existingConnection.createdAt || 0);
-        const isHealthy =
-            connectionState === "connected" || connectionState === "completed" ||
-            iceState === "connected" || iceState === "completed";
-        const isStillEstablishing =
-            ["new", "connecting"].includes(connectionState) ||
-            ["new", "checking"].includes(iceState);
-        if (isHealthy){
-            console.log("connectToUser: Connection to " + user + " already established");
-            return existingConnection;
-        }
-        if (isStillEstablishing && connectionAge < this.connectRetryDelay * 2){
-            console.log("connectToUser: Connection to " + user + " still establishing (" + connectionState + "/" + iceState + ")");
-            return existingConnection;
-        }
-        console.warn("connectToUser: Connection to " + user + " stuck in " + connectionState + "/" + iceState + ", restarting");
-        this.disconnectFromUser(user);
-        delete this.rtcConnections[user];
+  connectToUser(user){
+    if (!user || user === this.name){
+        return null;
     }
-    if (!this.connectionToUser(user)){
-        this.rtcConnections[user] = new RTCConnection(this, user);
-        this.rtcConnections[user].sendOffer();
-        this._scheduleConnectionRetry(user, attempt);
+    const establishedConnection = this.connectionToUser(user);
+    if (establishedConnection){
+        console.log("connectToUser: Already connected or connecting to " + user);
+        return establishedConnection;
+    }
+    if (this.rtcConnections[user]){
+        console.log("connectToUser: Connection to " + user + " is still negotiating");
         return this.rtcConnections[user];
     }
+    console.log(`connectToUser: Starting WebRTC offer to ${user}`);
+    const rtcConnection = new RTCConnection(this, user);
+    this.rtcConnections[user] = rtcConnection;
+    rtcConnection.sendOffer();
+    return rtcConnection;
   }
-  _attemptConnection(user){
-    if (!user || user === this.name){
-        return;
+  _shouldInitiateConnection(peerName) {
+    if (!peerName) {
+      return false;
     }
-    if (!this._shouldInitiateConnection(user)){
-        return;
+    if (peerName === this.name) {
+      return true;
     }
-    if (this.connectingUsers.has(user)){
-        return;
-    }
-    this.connectingUsers.add(user);
-    setTimeout(() => this.connectingUsers.delete(user), 2000);
-    this.connectToUser(user);
+    return this.name.localeCompare(peerName) < 0;
   }
   _shouldInitiateConnection(peerName){
     if (!peerName){
@@ -630,88 +629,6 @@ class BaseMQTTRTCClient extends EventEmitter {
         return this.name.length <= peerName.length;
     }
     return this.name.localeCompare(peerName) < 0;
-  }
-  _startConnectionMaintenance() {
-    if (this.connectionMaintenanceInterval) {
-      clearInterval(this.connectionMaintenanceInterval);
-    }
-    this.connectionMaintenanceInterval = setInterval(this._maintainPeerConnections, this.connectionMaintenanceIntervalMs);
-    this._maintainPeerConnections();
-  }
-  _maintainPeerConnections() {
-    Object.keys(this.knownUsers).forEach((peerName) => {
-      if (!peerName || peerName === this.name) {
-        return;
-      }
-      const connection = this.rtcConnections[peerName];
-      if (!connection) {
-        if (!this._shouldInitiateConnection(peerName)) {
-          return;
-        }
-        this._attemptConnection(peerName);
-        return;
-      }
-      const pc = connection.peerConnection;
-      const connectionState = pc?.connectionState;
-      const iceState = pc?.iceConnectionState;
-      const signalingState = pc?.signalingState;
-      const hasRemoteDescription = !!pc?.remoteDescription;
-      const waitingForAnswer = signalingState === "have-local-offer" && !hasRemoteDescription;
-      const connectionAge = Date.now() - (connection.createdAt || 0);
-      const isHealthy =
-        connectionState === "connected" || connectionState === "completed" ||
-        iceState === "connected" || iceState === "completed";
-      const isStillEstablishing =
-        ["new", "connecting"].includes(connectionState) ||
-        ["new", "checking"].includes(iceState);
-      if (isHealthy) {
-        return;
-      }
-      if ((isStillEstablishing || waitingForAnswer) && connectionAge < this.waitForAnswerTimeout) {
-        return;
-      }
-      if (!this._shouldInitiateConnection(peerName)) {
-        return;
-      }
-      console.warn(`Connection maintenance: ${peerName} stuck in ${connectionState}/${iceState}, attempting reconnection`);
-      this.disconnectFromUser(peerName);
-      delete this.rtcConnections[peerName];
-      this._attemptConnection(peerName);
-    });
-  }
-  _scheduleConnectionRetry(user, attempt){
-    if (attempt >= this.maxConnectRetries){
-        return;
-    }
-    setTimeout(() => {
-        const connection = this.rtcConnections[user];
-        if (!connection){
-            return;
-        }
-        const pc = connection.peerConnection;
-        if (!pc){
-            return;
-        }
-        const connectionState = pc.connectionState;
-        const iceState = pc.iceConnectionState;
-        const signalingState = pc.signalingState;
-        const hasRemoteDescription = !!pc.remoteDescription;
-        const waitingForAnswer = signalingState === "have-local-offer" && !hasRemoteDescription;
-        const connectionAge = Date.now() - (connection.createdAt || 0);
-        if (connectionState === "connected" || connectionState === "completed" ||
-            iceState === "connected" || iceState === "completed"){
-            return;
-        }
-        if ((waitingForAnswer || connectionState === "new" || iceState === "new") &&
-            connectionAge < this.waitForAnswerTimeout){
-            console.log(`Connection to ${user} still negotiating (${connectionState}/${iceState}, signaling ${signalingState}). Waiting before retry...`);
-            this._scheduleConnectionRetry(user, attempt);
-            return;
-        }
-        console.warn(`Connection to ${user} still in '${connectionState}/${iceState}' after attempt ${attempt}. Retrying...`);
-        this.disconnectFromUser(user);
-        this.connectToUser(user, attempt + 1);
-    }, this.connectRetryDelay);
   }
   connectionToUser(user){
     let existingConnection = this.rtcConnections[user];
@@ -751,6 +668,8 @@ class BaseMQTTRTCClient extends EventEmitter {
     }else{
         console.warn("No connection to close to " + user);
     }
+    this.connectingUsers.delete(user);
+    this.attemptedPeers.delete(user);
   }
   onConnectedToUser(user){
     console.log("Connected to user ", user);
@@ -771,6 +690,8 @@ class BaseMQTTRTCClient extends EventEmitter {
   onDisconnectedFromUser(user){
     console.log("Disconnected from user ", user);
     this.emit('disconnectedfrompeer', user);
+    this.connectingUsers.delete(user);
+    this.attemptedPeers.delete(user);
   }
 
   changeName(newName){
@@ -940,6 +861,10 @@ class RTCConnection {
 
     startCall(stream){
         this.initiatedCall = true;
+        if (this.streamConnection && this.streamConnection.signalingState !== "closed"){
+            console.warn("startCall: stream connection already active or negotiating; returning existing promise");
+            return this.streamPromise.promise;
+        }
         // Detect call type from stream tracks
         const hasVideo = stream.getVideoTracks().length > 0;
         const hasAudio = stream.getAudioTracks().length > 0;
@@ -984,6 +909,14 @@ class RTCConnection {
         this.mqttClient.oncallconnected(this.target, d);
     }
     sendOffer(){
+        if (!this.peerConnection){
+            console.error("sendOffer called but peerConnection missing");
+            return;
+        }
+        if (this.peerConnection.signalingState !== "stable"){
+            console.warn(`sendOffer: signaling state is ${this.peerConnection.signalingState}, waiting for stable state before creating offer`);
+            return;
+        }
         this.setupDataChannels();
         this.peerConnection.createOffer()
           .then(offer => this.peerConnection.setLocalDescription(offer))
