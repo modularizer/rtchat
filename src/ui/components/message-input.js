@@ -10,18 +10,17 @@
  * Note: Call buttons (Audio/Video/End) are now in the call-management section
  * 
  * @class MessageInput
- * @extends HTMLElement
+ * @extends UIComponentBase
  */
-class MessageInput extends HTMLElement {
+
+import { UIComponentBase } from '../../core/interfaces/ui-component-base.js';
+
+class MessageInput extends UIComponentBase {
   constructor(config = {}) {
-    super();
-    
-    this.config = {
+    super({
       callModes: config.callModes || 'both', // 'audio' | 'video' | 'both'
       ...config
-    };
-    
-    this.attachShadow({ mode: 'open' });
+    });
     
     this.shadowRoot.innerHTML = `
       <style>
@@ -72,10 +71,18 @@ class MessageInput extends HTMLElement {
   }
   
   _cacheElements() {
-    this.inputContainer = this.shadowRoot.querySelector('.input-container');
-    this.inputMessage = this.shadowRoot.getElementById('input-message');
-    this.emojiButton = this.shadowRoot.getElementById('emoji-button');
-    this.clearButton = this.shadowRoot.getElementById('clear-button');
+    this.inputContainer = this.queryRoot('.input-container');
+    this.inputMessage = this.queryRoot('#input-message');
+    this.emojiButton = this.queryRoot('#emoji-button');
+    this.clearButton = this.queryRoot('#clear-button');
+  }
+  
+  /**
+   * Initialize the component
+   * @protected
+   */
+  _initialize() {
+    // Component is ready after shadow DOM is set up
   }
   
   _setupEventListeners() {
@@ -93,20 +100,14 @@ class MessageInput extends HTMLElement {
     // Emoji button
     if (this.emojiButton) {
       this.emojiButton.addEventListener('click', () => {
-        this.dispatchEvent(new CustomEvent('emojiclick', {
-          bubbles: true,
-          composed: true
-        }));
+        this.dispatchCustomEvent('emojiclick');
       });
     }
     
     // Clear button
     if (this.clearButton) {
       this.clearButton.addEventListener('click', () => {
-        this.dispatchEvent(new CustomEvent('clearclick', {
-          bubbles: true,
-          composed: true
-        }));
+        this.dispatchCustomEvent('clearclick');
       });
     }
     
@@ -116,11 +117,7 @@ class MessageInput extends HTMLElement {
   _onSend() {
     const message = this.inputMessage.value.trim();
     if (message) {
-      this.dispatchEvent(new CustomEvent('sendmessage', {
-        detail: { message },
-        bubbles: true,
-        composed: true
-      }));
+      this.dispatchCustomEvent('sendmessage', { message });
       this.clear();
     }
   }

@@ -1,6 +1,9 @@
 /**
  * VideoStreamDisplay - Standalone component for displaying WebRTC video streams in chat
  * 
+ * HTMLElement-based implementation that extends VideoStreamDisplayBase,
+ * which provides the abstract contract for video stream display.
+ * 
  * A modular component that manages video elements for multiple peer connections.
  * Uses VideoInterface implementations for local and remote video elements.
  * 
@@ -28,8 +31,9 @@
 
 import { VideoElement } from './video-element.js';
 import { VideoInterface } from '../core/interfaces/video-interface.js';
+import { VideoStreamDisplayBase } from '../core/interfaces/video-stream-display-base.js';
 
-class VideoStreamDisplay {
+class VideoStreamDisplay extends VideoStreamDisplayBase {
   /**
    * Create a new VideoStreamDisplay instance
    * @param {HTMLElement} container - Container element to append video elements to
@@ -39,31 +43,27 @@ class VideoStreamDisplay {
    * @param {class} options.VideoClass - Video class implementing VideoInterface (default: VideoElement)
    */
   constructor(container, options = {}) {
-    if (!container) {
-      throw new Error('VideoStreamDisplay requires a container element');
-    }
+    super(container, {
+      localVideoSize: options.localVideoSize || '30%',
+      localVideoPosition: options.localVideoPosition || 'top-right',
+      VideoClass: options.VideoClass || VideoElement,
+      ...options
+    });
     
-    this.container = container;
-    this.VideoClass = options.VideoClass || VideoElement;
+    this.VideoClass = this.options.VideoClass;
     
     // Validate VideoClass implements VideoInterface
     if (!this.VideoClass || typeof this.VideoClass !== 'function') {
       throw new Error('VideoClass must be a class implementing VideoInterface');
     }
     
-    this.options = {
-      localVideoSize: options.localVideoSize || '30%',
-      localVideoPosition: options.localVideoPosition || 'top-right',
-      ...options
-    };
-    
-    this.activeStreams = {}; // Track streams by peer name
     this._setupStyles();
   }
 
   /**
    * Set up CSS styles for video elements
-   * @private
+   * Implements VideoStreamDisplayBase._setupStyles
+   * @protected
    */
   _setupStyles() {
     // Get the root node (handles shadow DOM)
@@ -134,6 +134,7 @@ class VideoStreamDisplay {
 
   /**
    * Set video streams for a peer
+   * Implements VideoStreamDisplayBase.setStreams and StreamDisplayInterface.setStreams
    * @param {string} peerName - Name of the peer
    * @param {Object} streams - Stream objects
    * @param {MediaStream} streams.localStream - Local media stream
@@ -193,9 +194,10 @@ class VideoStreamDisplay {
 
   /**
    * Create a video container element for a peer
+   * Implements VideoStreamDisplayBase._createVideoContainer
    * @param {string} peerName - Name of the peer
-   * @returns {HTMLElement} Video container element
-   * @private
+   * @returns {Object} Object with container, remoteVideo, and localVideo
+   * @protected
    */
   _createVideoContainer(peerName) {
     const container = document.createElement('div');
@@ -233,46 +235,11 @@ class VideoStreamDisplay {
     return { container, remoteVideo, localVideo };
   }
 
-  /**
-   * Setup handlers for track end events
-   * @param {string} peerName - Name of the peer
-   * @param {MediaStream} localStream - Local stream
-   * @param {MediaStream} remoteStream - Remote stream
-   * @private
-   */
-  _setupTrackEndHandlers(peerName, localStream, remoteStream) {
-    // Remove existing handlers
-    if (this.activeStreams[peerName].trackEndHandlers) {
-      this.activeStreams[peerName].trackEndHandlers.forEach(handler => {
-        if (handler.track && handler.track.onended) {
-          handler.track.onended = null;
-        }
-      });
-    }
-    this.activeStreams[peerName].trackEndHandlers = [];
-
-    // Setup new handlers - only if streams are valid MediaStream objects
-    const handleTrackEnd = () => {
-      console.log(`Stream track ended for ${peerName}`);
-      this.removeStreams(peerName);
-    };
-
-    if (remoteStream && remoteStream instanceof MediaStream && typeof remoteStream.getTracks === 'function') {
-      remoteStream.getTracks().forEach(track => {
-        track.onended = handleTrackEnd;
-        this.activeStreams[peerName].trackEndHandlers.push({ track, type: 'remote' });
-      });
-    }
-    if (localStream && localStream instanceof MediaStream && typeof localStream.getTracks === 'function') {
-      localStream.getTracks().forEach(track => {
-        track.onended = handleTrackEnd;
-        this.activeStreams[peerName].trackEndHandlers.push({ track, type: 'local' });
-      });
-    }
-  }
+  // _setupTrackEndHandlers is inherited from VideoStreamDisplayBase
 
   /**
    * Remove video streams for a peer
+   * Implements VideoStreamDisplayBase.removeStreams and StreamDisplayInterface.removeStreams
    * @param {string} peerName - Name of the peer
    */
   removeStreams(peerName) {
@@ -281,18 +248,10 @@ class VideoStreamDisplay {
       return;
     }
 
-    // Stop all tracks - only if streams are valid MediaStream objects
+    // Stop all tracks using base class helper
     if (streamData.streams) {
-      if (streamData.streams.local && streamData.streams.local instanceof MediaStream && typeof streamData.streams.local.getTracks === 'function') {
-        streamData.streams.local.getTracks().forEach(track => {
-          track.stop();
-        });
-      }
-      if (streamData.streams.remote && streamData.streams.remote instanceof MediaStream && typeof streamData.streams.remote.getTracks === 'function') {
-        streamData.streams.remote.getTracks().forEach(track => {
-          track.stop();
-        });
-      }
+      this._stopStreamTracks(streamData.streams.local);
+      this._stopStreamTracks(streamData.streams.remote);
     }
 
     // Remove track end handlers
@@ -332,45 +291,8 @@ class VideoStreamDisplay {
     }
   }
 
-  /**
-   * Remove all video streams
-   */
-  removeAllStreams() {
-    const peerNames = Object.keys(this.activeStreams);
-    peerNames.forEach(peerName => this.removeStreams(peerName));
-  }
-
-  /**
-   * Check if there are active streams
-   * @returns {boolean} True if there are active streams
-   */
-  hasActiveStreams() {
-    return Object.keys(this.activeStreams).length > 0;
-  }
-
-  /**
-   * Get list of active peer names
-   * @returns {string[]} Array of peer names with active streams
-   */
-  getActivePeers() {
-    return Object.keys(this.activeStreams);
-  }
-
-  /**
-   * Show the video container
-   */
-  show() {
-    if (this.hasActiveStreams()) {
-      this.container.style.display = 'block';
-    }
-  }
-
-  /**
-   * Hide the video container
-   */
-  hide() {
-    this.container.style.display = 'none';
-  }
+  // removeAllStreams, hasActiveStreams, getActivePeers, show, and hide
+  // are inherited from VideoStreamDisplayBase
 }
 
 export { VideoStreamDisplay };

@@ -2,22 +2,21 @@
  * ChatHeader - Component for chat header with room and name inputs
  * 
  * @class ChatHeader
- * @extends HTMLElement
+ * @extends UIComponentBase
  */
-class ChatHeader extends HTMLElement {
+
+import { UIComponentBase } from '../../core/interfaces/ui-component-base.js';
+
+class ChatHeader extends UIComponentBase {
   constructor(config = {}) {
-    super();
-    
-    this.config = {
+    super({
       allowRoomChange: config.allowRoomChange !== false,
       showRoom: config.showRoom !== false,
       baseTopic: config.baseTopic || '',
       currentRoom: config.currentRoom || '',
       primaryUserColor: config.primaryUserColor || 'lightblue',
       ...config
-    };
-    
-    this.attachShadow({ mode: 'open' });
+    });
     
     this.shadowRoot.innerHTML = `
       <style>
@@ -90,22 +89,46 @@ class ChatHeader extends HTMLElement {
     
     this._cacheElements();
     this._setupEventListeners();
-    this._initialize();
+  }
+  
+  /**
+   * Initialize the component
+   * @protected
+   */
+  _initialize() {
+    // Set initial room visibility
+    if (this.roomDisplay) {
+      if (this.getConfig('showRoom')) {
+        this.roomDisplay.classList.remove('hidden');
+      } else {
+        this.roomDisplay.classList.add('hidden');
+      }
+    }
+    
+    // Set initial room name
+    if (this.roomName) {
+      this.roomName.value = this.getConfig('currentRoom') || '';
+    }
+    
+    // Set room prefix
+    if (this.roomPrefix) {
+      this.roomPrefix.textContent = this.getConfig('baseTopic') || '';
+    }
   }
   
   _cacheElements() {
-    this.roomDisplay = this.shadowRoot.querySelector('.room-display');
-    this.roomPrefix = this.shadowRoot.getElementById('room-prefix');
-    this.roomName = this.shadowRoot.getElementById('room-name');
-    this.chatRoomBox = this.shadowRoot.getElementById('chat-room-box');
-    this.chatRoom = this.shadowRoot.getElementById('chat-room');
-    this.chatName = this.shadowRoot.getElementById('chat-name');
+    this.roomDisplay = this.queryRoot('.room-display');
+    this.roomPrefix = this.queryRoot('#room-prefix');
+    this.roomName = this.queryRoot('#room-name');
+    this.chatRoomBox = this.queryRoot('#chat-room-box');
+    this.chatRoom = this.queryRoot('#chat-room');
+    this.chatName = this.queryRoot('#chat-name');
   }
   
   _setupEventListeners() {
     // Room name editing
     if (this.roomName) {
-      if (this.config.allowRoomChange) {
+      if (this.getConfig('allowRoomChange')) {
         this.roomName.addEventListener('blur', () => this._onRoomChange());
         this.roomName.addEventListener('keydown', (e) => {
           if (e.key === 'Enter') {
@@ -165,27 +188,19 @@ class ChatHeader extends HTMLElement {
   
   _onRoomChange() {
     const newRoom = this.roomName.value.trim();
-    this.dispatchEvent(new CustomEvent('roomchange', {
-      detail: { room: newRoom },
-      bubbles: true,
-      composed: true
-    }));
+    this.dispatchCustomEvent('roomchange', { room: newRoom });
   }
   
   _cancelRoomEdit() {
     // Restore previous value
     if (this.roomName) {
-      this.roomName.value = this.config.currentRoom || '';
+      this.roomName.value = this.getConfig('currentRoom') || '';
     }
   }
   
   _onNameChange() {
     const newName = this.chatName.value.trim();
-    this.dispatchEvent(new CustomEvent('namechange', {
-      detail: { name: newName },
-      bubbles: true,
-      composed: true
-    }));
+    this.dispatchCustomEvent('namechange', { name: newName });
   }
   
   // Public API
@@ -193,7 +208,7 @@ class ChatHeader extends HTMLElement {
     if (this.roomName) {
       this.roomName.value = room;
     }
-    this.config.currentRoom = room;
+    this.setConfig('currentRoom', room);
   }
   
   setName(name) {
@@ -206,12 +221,13 @@ class ChatHeader extends HTMLElement {
     if (this.roomPrefix) {
       this.roomPrefix.textContent = prefix;
     }
-    this.config.baseTopic = prefix;
+    this.setConfig('baseTopic', prefix);
   }
   
   setCollapsible(collapsible) {
-    if (this.shadowRoot.querySelector('.chat-header')) {
-      this.shadowRoot.querySelector('.chat-header').style.cursor = collapsible ? 'pointer' : 'default';
+    const header = this.queryRoot('.chat-header');
+    if (header) {
+      header.style.cursor = collapsible ? 'pointer' : 'default';
     }
   }
 }

@@ -1,19 +1,21 @@
 /**
  * ActiveUsersList - Component for displaying active users with colored chips
  * 
+ * HTMLElement-based implementation that extends ActiveUsersListHTMLElementBase,
+ * which provides both HTMLElement functionality and ActiveUsersListBase contract.
+ * 
  * @class ActiveUsersList
- * @extends HTMLElement
+ * @extends ActiveUsersListHTMLElementBase
  */
-class ActiveUsersList extends HTMLElement {
+
+import { ActiveUsersListHTMLElementBase } from '../base-html/active-users-list-html-base.js';
+
+class ActiveUsersList extends ActiveUsersListHTMLElementBase {
   constructor(config = {}) {
-    super();
-    
-    this.config = {
+    super({
       userColors: config.userColors || ['lightcoral', 'lightseagreen', 'lightsalmon', 'lightgreen'],
       ...config
-    };
-    
-    this.attachShadow({ mode: 'open' });
+    });
     
     this.shadowRoot.innerHTML = `
       <style>
@@ -53,12 +55,20 @@ class ActiveUsersList extends HTMLElement {
       </div>
     `;
     
-    this.activeUsersEl = this.shadowRoot.querySelector('.active-users');
-    this.userColorMap = new Map(); // Map<user, color>
+    this.activeUsersEl = this.queryRoot('.active-users');
+  }
+  
+  /**
+   * Initialize the component
+   * @protected
+   */
+  _initialize() {
+    // Component is ready after shadow DOM is set up
   }
   
   /**
    * Update the list of active users
+   * Implements ActiveUsersListBase.updateUsers
    * @param {Array<string>} users - List of active user names
    * @param {Function} getUserColor - Optional function to get color for a user
    */
@@ -89,7 +99,8 @@ class ActiveUsersList extends HTMLElement {
       } else {
         // Use index-based color assignment
         const index = users.indexOf(user);
-        userColor = this.config.userColors[index % this.config.userColors.length];
+        const userColors = this.getConfig('userColors') || [];
+        userColor = userColors[index % userColors.length];
       }
       
       bubble.style.backgroundColor = userColor;
@@ -97,33 +108,19 @@ class ActiveUsersList extends HTMLElement {
       bubble.title = user;
       
       bubble.addEventListener('click', () => {
-        this.dispatchEvent(new CustomEvent('userclick', {
-          detail: { user },
-          bubbles: true,
-          composed: true
-        }));
+        // Call base class method which dispatches event
+        this._onUserClick(user);
       });
       
       this.activeUsersEl.appendChild(bubble);
     });
   }
   
-  /**
-   * Get color for a user (for consistency)
-   * @param {string} user - User name
-   * @returns {string} Color
-   */
-  getUserColor(user) {
-    if (!this.userColorMap.has(user)) {
-      const index = this.userColorMap.size;
-      const color = this.config.userColors[index % this.config.userColors.length];
-      this.userColorMap.set(user, color);
-    }
-    return this.userColorMap.get(user);
-  }
+  // getUserColor is inherited from ActiveUsersListHTMLElementBase
   
   /**
    * Clear the user list
+   * Implements ActiveUsersListBase.clear
    */
   clear() {
     if (this.activeUsersEl) {

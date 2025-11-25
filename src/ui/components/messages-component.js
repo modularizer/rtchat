@@ -7,19 +7,18 @@
  * - Custom message components
  * 
  * @class MessagesComponent
- * @extends HTMLElement
+ * @extends UIComponentBase
  */
-class MessagesComponent extends HTMLElement {
+
+import { UIComponentBase } from '../../core/interfaces/ui-component-base.js';
+
+class MessagesComponent extends UIComponentBase {
   constructor(config = {}) {
-    super();
-    
-    this.config = {
+    super({
       primaryUserColor: config.primaryUserColor || 'lightblue',
       userColors: config.userColors || ['lightcoral', 'lightseagreen', 'lightsalmon', 'lightgreen'],
       ...config
-    };
-    
-    this.attachShadow({ mode: 'open' });
+    });
     
     this.shadowRoot.innerHTML = `
       <style>
@@ -56,8 +55,16 @@ class MessagesComponent extends HTMLElement {
       <div class="messages"></div>
     `;
     
-    this.messagesEl = this.shadowRoot.querySelector('.messages');
+    this.messagesEl = this.queryRoot('.messages');
     this.userColorMap = new Map(); // Map<user, color>
+  }
+  
+  /**
+   * Initialize the component
+   * @protected
+   */
+  _initialize() {
+    // Component is ready after shadow DOM is set up
   }
   
   /**
@@ -87,7 +94,7 @@ class MessagesComponent extends HTMLElement {
     // Check if it's own message or from others
     if (isOwn || sender && sender.includes('( You )')) {
       messageEl.classList.add('own-message');
-      messageEl.style.backgroundColor = this.config.primaryUserColor;
+      messageEl.style.backgroundColor = this.getConfig('primaryUserColor');
     } else {
       messageEl.classList.add('other-message');
       // Get user color
@@ -118,11 +125,12 @@ class MessagesComponent extends HTMLElement {
    * @returns {string} Color
    */
   getUserColor(user) {
-    if (!user) return this.config.userColors[0];
+    if (!user) return this.getConfig('userColors')[0];
     
     if (!this.userColorMap.has(user)) {
       const index = this.userColorMap.size;
-      const color = this.config.userColors[index % this.config.userColors.length];
+      const userColors = this.getConfig('userColors');
+      const color = userColors[index % userColors.length];
       this.userColorMap.set(user, color);
     }
     return this.userColorMap.get(user);
