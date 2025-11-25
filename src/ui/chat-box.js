@@ -995,12 +995,38 @@ class ChatBox extends HTMLElement {
     // Show missed call message
     this._showMissedCallMessage(peerName, direction);
     
+    // Also show a chat message when the call is missed
+    // For incoming calls: show "You missed ${peerName}'s call"
+    // For outgoing calls: the notification already shows "${peerName} missed your call"
+    if (direction === 'incoming' && this.messagesComponent) {
+      const missedCallMessage = `You missed ${peerName}'s call`;
+      this.appendMessage({
+        data: missedCallMessage,
+        sender: 'System',
+        timestamp: Date.now(),
+        isOwn: false
+      });
+    }
+    
     // Clean up UI streams
     this.videoDisplay.removeStreams(peerName);
     this.audioDisplay.removeStreams(peerName);
     
+    // Get current state from CallManager (state is already updated when event fires)
+    const activeCalls = this.callManager ? this.callManager.getActiveCalls() : {audio: new Set(), video: new Set()};
+    const hasActiveCalls = activeCalls.video.size > 0 || activeCalls.audio.size > 0;
+    
+    // Reset call type
+    this.activeCallType = null;
+    
     // Update call controls
     this._updateCallControlsVisibility();
+    
+    // Update button states to reset cancel button back to inactive state
+    this._updateCallButtonStates(hasActiveCalls);
+    
+    // Update button visibility to restore start call buttons if no active calls
+    this._updateCallButtonVisibility();
   }
 
   /**
