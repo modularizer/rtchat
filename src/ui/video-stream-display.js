@@ -63,6 +63,7 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
     }
     
     this._setupStyles();
+    this._localStream = null;
   }
 
   /**
@@ -75,61 +76,57 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
     const root = this.container.getRootNode ? this.container.getRootNode() : document;
     
     // Check if styles already exist in the root
-    if (root.querySelector && root.querySelector('style[data-video-stream-display]')) {
-      return;
+    if (root.querySelector) {
+      const existingStyle = root.querySelector('style[data-video-stream-display]');
+      if (existingStyle) {
+        const version = existingStyle.getAttribute('data-style-version');
+        if (version === '2') {
+          return;
+        }
+        if (existingStyle.parentNode) {
+          existingStyle.parentNode.removeChild(existingStyle);
+        }
+      }
     }
 
     const style = document.createElement('style');
     style.setAttribute('data-video-stream-display', 'true');
+    style.setAttribute('data-style-version', '2');
     style.textContent = `
       .video-stream-display-container {
-        display: grid;
+        display: none;
         gap: 10px;
         width: 100%;
         padding: 10px;
         min-height: 300px;
       }
-      /* 2 people: current layout (one main, one overlay) */
-      .video-stream-display-container.count-2 {
+      .video-stream-display-container.is-active {
+        display: grid !important;
+      }
+      .video-stream-display-container.count-1 {
         grid-template-columns: 1fr;
         grid-template-rows: 1fr;
       }
-      .video-stream-display-container.count-2 .video-stream-container:first-child {
-        position: relative;
-      }
-      .video-stream-display-container.count-2 .video-stream-container:first-child .video-stream-local {
-        position: absolute;
-        width: 30%;
-        max-width: 30%;
-        top: 10px;
-        right: 10px;
-        border: 2px solid white;
-        box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
-        border-radius: 5px;
-        background: #000;
-        z-index: 10;
-        object-fit: cover;
-        aspect-ratio: 16 / 9;
-      }
-      /* 3 people: row of 2.5 (your video smaller, two others larger) */
-      .video-stream-display-container.count-3 {
-        grid-template-columns: 0.4fr 1fr 1fr;
+      /* Two remote participants: place both side by side */
+      .video-stream-display-container.count-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
         grid-template-rows: 1fr;
       }
-      /* Ensure local video (first item) is smaller in 3-person layout */
-      .video-stream-display-container.count-3 .local-video-container {
-        min-width: 0;
+      /* 3 people: three equal columns */
+      .video-stream-display-container.count-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-rows: 1fr;
       }
       /* 4 people: 2x2 grid */
       .video-stream-display-container.count-4 {
-        grid-template-columns: repeat(2, 1fr);
-        grid-template-rows: repeat(2, 1fr);
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-rows: repeat(2, minmax(0, 1fr));
       }
       /* 5-6 people: 2x3 grid */
       .video-stream-display-container.count-5,
       .video-stream-display-container.count-6 {
-        grid-template-columns: repeat(2, 1fr);
-        grid-template-rows: repeat(3, 1fr);
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-rows: repeat(2, minmax(0, 1fr));
       }
       /* 7-9 people: 3x3 grid */
       .video-stream-display-container.count-7,
@@ -142,6 +139,14 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
       .video-stream-display-container.count-10-plus {
         grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
         grid-auto-rows: minmax(150px, 1fr);
+      }
+      /* Two-person overlay layout */
+      .video-stream-display-container.two-person-overlay {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr;
+      }
+      .video-stream-display-container.two-person-overlay .video-stream-container {
+        position: relative;
       }
       .video-stream-container {
         position: relative;
@@ -162,9 +167,29 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
         width: 100%;
         height: 100%;
       }
-      /* Local video overlay - only shown for 2-person calls */
       .video-stream-local {
-        display: none; /* Hidden by default, shown only for 2-person layout */
+        display: none;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .video-stream-display-container.two-person-overlay .video-stream-container:first-child .video-stream-local {
+        display: block !important;
+        position: absolute;
+        width: 30%;
+        max-width: 30%;
+        height: auto;
+        aspect-ratio: 16 / 9;
+        top: 10px;
+        right: 10px;
+        border: 2px solid white;
+        box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+        border-radius: 5px;
+        background: #000;
+        opacity: 1 !important;
+        pointer-events: auto !important;
+        z-index: 10;
       }
       .video-stream-label {
         position: absolute;
@@ -240,11 +265,6 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
       this.activeStreams[peerName] = streamData;
     }
 
-    // Count remote participants (excluding local video container)
-    const remoteParticipants = Object.keys(this.activeStreams).filter(key => key !== '__local__');
-    const participantCount = remoteParticipants.length;
-    const isGroupCall = participantCount >= 2;
-
     // Set remote stream (always shown in grid)
     if (remoteStream && remoteStream instanceof MediaStream) {
       streamData.remoteVideo.setStream(remoteStream);
@@ -260,47 +280,11 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
       }
     }
     
-    // Handle local video stream
-    // Store local stream reference (same for all peers in a call)
-    if (localStream && localStream instanceof MediaStream) {
+    // Track latest local stream (may be reused across peers)
+    if (localStream instanceof MediaStream) {
       this._localStream = localStream;
-      
-      if (participantCount === 2) {
-        // 2-person call: show local video as overlay on first remote video
-        const firstPeer = remoteParticipants[0];
-        if (peerName === firstPeer) {
-          streamData.localVideo.setStream(localStream);
-          streamData.localVideo.show();
-          if (streamData.localVideo.getElement()) {
-            streamData.localVideo.getElement().style.display = 'block';
-          }
-        } else {
-          // Hide local video overlay on second peer
-          streamData.localVideo.setStream(null);
-          streamData.localVideo.hide();
-          if (streamData.localVideo.getElement()) {
-            streamData.localVideo.getElement().style.display = 'none';
-          }
-        }
-      } else if (participantCount >= 3) {
-        // 3+ person call: show local video as separate grid item
-        // Hide overlay on all remote videos
-        streamData.localVideo.setStream(null);
-        streamData.localVideo.hide();
-        if (streamData.localVideo.getElement()) {
-          streamData.localVideo.getElement().style.display = 'none';
-        }
-        
-        // Create/update local video container as separate grid item
-        this._updateLocalVideoInGrid(localStream);
-      } else {
-        // Single person call
-        streamData.localVideo.setStream(localStream);
-        streamData.localVideo.show();
-      }
-    } else {
-      streamData.localVideo.setStream(null);
-      streamData.localVideo.hide();
+    } else if (localStream === null) {
+      this._localStream = null;
     }
 
     // Store streams for cleanup
@@ -310,12 +294,53 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
     // Setup track end handlers
     this._setupTrackEndHandlers(peerName, localStream, remoteStream);
 
+    // Sync local video layout (overlay vs grid tile)
+    this._refreshLocalVideoLayout();
+
     // Update grid layout based on number of participants
     this._updateGridLayout();
 
-    // Show container if hidden
-    if (this.container.style.display === 'none') {
-      this.container.style.display = 'block';
+    this._updateContainerVisibility();
+  }
+  
+  /**
+   * Ensure local video is displayed either as overlay (1 remote) or grid tile (2+ remotes)
+   * @private
+   */
+  _refreshLocalVideoLayout() {
+    const remoteParticipants = Object.keys(this.activeStreams).filter(key => key !== '__local__');
+    const remoteCount = remoteParticipants.length;
+    const hasLocalStream = this._localStream instanceof MediaStream;
+
+    // Hide overlays by default
+    for (const peer of remoteParticipants) {
+      const data = this.activeStreams[peer];
+      if (data && data.localVideo) {
+        data.localVideo.setStream(null);
+        data.localVideo.hide();
+        const el = data.localVideo.getElement ? data.localVideo.getElement() : null;
+        if (el) {
+          el.style.display = 'none';
+        }
+      }
+    }
+
+    if (hasLocalStream && remoteCount === 1) {
+      const targetPeer = remoteParticipants[0];
+      const targetData = targetPeer ? this.activeStreams[targetPeer] : null;
+      if (targetData && targetData.localVideo) {
+        targetData.localVideo.setStream(this._localStream);
+        targetData.localVideo.show();
+        const overlayEl = targetData.localVideo.getElement ? targetData.localVideo.getElement() : null;
+        if (overlayEl) {
+          overlayEl.style.display = 'block';
+        }
+      }
+      this._deleteStreamData('__local__');
+    } else if (hasLocalStream && remoteCount >= 2) {
+      this._updateLocalVideoInGrid(this._localStream);
+    } else {
+      this._deleteStreamData('__local__');
     }
   }
   
@@ -371,19 +396,24 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
     // Count only remote participants (exclude local video container)
     const remoteParticipants = Object.keys(this.activeStreams).filter(key => key !== '__local__');
     const hasLocalVideoInGrid = this.activeStreams['__local__'] !== undefined;
+    const remoteCount = remoteParticipants.length;
+    const totalCount = remoteCount + (hasLocalVideoInGrid ? 1 : 0);
     
-    // Total count includes local video if shown separately (3+ participants)
-    // For 2 participants, local is overlay so don't count it
-    const totalCount = remoteParticipants.length >= 3 
-      ? remoteParticipants.length + (hasLocalVideoInGrid ? 1 : 0)
-      : remoteParticipants.length;
-    
-    // Remove all count-based layout classes
+    // Remove all layout classes
     const countClasses = Array.from(this.container.classList).filter(cls => cls.startsWith('count-'));
     countClasses.forEach(cls => this.container.classList.remove(cls));
+    this.container.classList.remove('two-person-overlay');
     
-    // Apply layout based on participant count
-    if (totalCount === 1) {
+    // Overlay layout for exactly one remote participant (classic 2-person view)
+    if (remoteCount === 1 && !hasLocalVideoInGrid && this._localStream instanceof MediaStream) {
+      this.container.classList.add('count-1');
+      this.container.classList.add('two-person-overlay');
+      console.log('Updated grid layout: two-person overlay mode');
+      return;
+    }
+    
+    // Apply layout based on total visible tiles
+    if (totalCount <= 1) {
       this.container.classList.add('count-1');
     } else if (totalCount === 2) {
       this.container.classList.add('count-2');
@@ -399,7 +429,8 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
       this.container.classList.add('count-10-plus');
     }
     
-    console.log(`Updated grid layout: ${totalCount} participants (${remoteParticipants.length} remote + ${hasLocalVideoInGrid && remoteParticipants.length >= 3 ? 1 : 0} local)`);
+    const localContribution = hasLocalVideoInGrid ? 1 : 0;
+    console.log(`Updated grid layout: ${totalCount} tiles (${remoteCount} remote + ${localContribution} local)`);
   }
 
   /**
@@ -435,7 +466,7 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
     label.setAttribute('data-peer', peerName);
     container.appendChild(label);
 
-    // Create local video using VideoInterface implementation
+    // Create local video using VideoInterface implementation for overlay mode
     const localVideo = new this.VideoClass({
       autoplay: true,
       playsinline: true,
@@ -452,14 +483,12 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
     return { container, remoteVideo, localVideo, label };
   }
 
-  // _setupTrackEndHandlers is inherited from VideoStreamDisplayBase
-
   /**
-   * Remove video streams for a peer
-   * Implements VideoStreamDisplayBase.removeStreams and StreamDisplayInterface.removeStreams
-   * @param {string} peerName - Name of the peer
+   * Delete stream data for a peer without triggering layout updates
+   * @param {string} peerName
+   * @private
    */
-  removeStreams(peerName) {
+  _deleteStreamData(peerName) {
     const streamData = this.activeStreams[peerName];
     if (!streamData) {
       return;
@@ -499,22 +528,39 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
       streamData.container.parentNode.removeChild(streamData.container);
     }
 
-    // Remove from active streams
     delete this.activeStreams[peerName];
-    
-    // If we removed a remote participant and now have < 3 participants, remove local video from grid
-    const remoteParticipants = Object.keys(this.activeStreams).filter(key => key !== '__local__');
-    if (remoteParticipants.length < 3 && this.activeStreams['__local__']) {
-      this.removeStreams('__local__');
+  }
+
+  // _setupTrackEndHandlers is inherited from VideoStreamDisplayBase
+
+  /**
+   * Remove video streams for a peer
+   * Implements VideoStreamDisplayBase.removeStreams and StreamDisplayInterface.removeStreams
+   * @param {string} peerName - Name of the peer
+   */
+  removeStreams(peerName) {
+    if (!this.activeStreams[peerName]) {
+      return;
     }
+
+    this._deleteStreamData(peerName);
+
+    // Re-sync overlay/grid state after removal
+    this._refreshLocalVideoLayout();
 
     // Update grid layout
     this._updateGridLayout();
 
-    // Hide container if no active streams
-    if (Object.keys(this.activeStreams).length === 0) {
-      this.container.style.display = 'none';
-    }
+    this._updateContainerVisibility();
+  }
+
+  /**
+   * Toggle container visibility class based on active streams
+   * @private
+   */
+  _updateContainerVisibility() {
+    const hasStreams = Object.keys(this.activeStreams).length > 0;
+    this.container.classList.toggle('is-active', hasStreams);
   }
 
   // removeAllStreams, hasActiveStreams, getActivePeers, show, and hide

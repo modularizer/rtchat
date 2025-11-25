@@ -347,12 +347,14 @@ class ChatBox extends HTMLElement {
       #chat-room { width: 200px; }
       #chat-name { width: 200px; }
       #chat-video {
-          max-height: 40vh;
-          overflow: auto;
-          display: none;
-          padding: 10px;
-        }
-      #chat-video.visible { display: block; }
+        max-height: 40vh;
+        overflow: auto;
+        display: none;
+        padding: 10px;
+      }
+      #chat-video.visible {
+        display: grid;
+      }
       #chat-audio {
         max-height: 20vh;
         overflow: auto;
@@ -419,17 +421,6 @@ class ChatBox extends HTMLElement {
         display: block;
       }
       .video-stream-remote { width: 100%; }
-      .video-stream-local {
-        position: absolute;
-        width: 25%;
-        max-width: 25%;
-        top: 10px;
-        right: 10px;
-        border: 2px solid white;
-        box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
-        border-radius: 5px;
-        background: #000;
-      }
       #chat-body {
         max-height: 40vh;
         overflow: auto;

@@ -10,7 +10,116 @@ export class TabManager {
     this.config = config;
     this.tabID = null;
     this.interval = null;
+    this.reinitializing = false;
+    this.instanceToken = this._generateRandomToken();
+    this.writeCounter = 0;
     this.initialize();
+  }
+  
+  /**
+   * Generate a random token for identifying writers/instances.
+   */
+  _generateRandomToken() {
+    if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+      return crypto.randomUUID();
+    }
+    return (
+      Math.random().toString(36).slice(2) +
+      Date.now().toString(36) +
+      Math.random().toString(36).slice(2)
+    );
+  }
+  
+  /**
+   * Generate a unique token for each write attempt so we can detect
+   * whether our mutation "won" the race when the state is re-read.
+   */
+  _nextWriteToken() {
+    this.writeCounter += 1;
+    return `${this.instanceToken}-${this.writeCounter}-${Date.now()}`;
+  }
+  
+  /**
+   * Normalize, sort, and deduplicate a list of tab IDs.
+   */
+  _normalizeTabs(tabs) {
+    const numericTabs = [];
+    for (let value of Array.isArray(tabs) ? tabs : []) {
+      const parsed = Number(value);
+      if (Number.isFinite(parsed) && parsed >= 0) {
+        numericTabs.push(Math.floor(parsed));
+      }
+    }
+    numericTabs.sort((a, b) => a - b);
+    const deduped = [];
+    for (let id of numericTabs) {
+      if (deduped.length === 0 || deduped[deduped.length - 1] !== id) {
+        deduped.push(id);
+      }
+    }
+    return deduped;
+  }
+  
+  _tabsChanged(prev, next) {
+    if (prev.length !== next.length) {
+      return true;
+    }
+    for (let i = 0; i < prev.length; i++) {
+      if (prev[i] !== next[i]) {
+        return true;
+      }
+    }
+    return false;
+  }
+  
+  /**
+   * Read the current tab state object from storage.
+   * Supports legacy array format for backward compatibility.
+   */
+  _readTabState() {
+    const raw = this.storage.getItem('tabs');
+    let writer = null;
+    let tabsPayload = [];
+    
+    if (raw) {
+      try {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          tabsPayload = parsed;
+        } else if (parsed && Array.isArray(parsed.tabs)) {
+          tabsPayload = parsed.tabs;
+          writer = parsed.writer || null;
+        }
+      } catch (e) {
+        if (this.config.debug) {
+          console.warn('TabManager: failed to parse tab state payload, resetting.', e);
+        }
+        this.storage.removeItem('tabs');
+      }
+    }
+    
+    const normalized = this._normalizeTabs(tabsPayload);
+    if (normalized.length !== tabsPayload.length) {
+      // Rewrite state immediately to remove duplicates/invalid entries.
+      this.storage.setItem('tabs', JSON.stringify({ writer, tabs: normalized }));
+      if (this.config.debug && tabsPayload.length > normalized.length) {
+        console.log(`Removed ${tabsPayload.length - normalized.length} invalid/duplicate tab ID(s)`);
+      }
+    }
+    
+    return { writer, tabs: normalized };
+  }
+  
+  /**
+   * Write the provided tabs list to storage alongside the writer token.
+   */
+  _writeTabState(tabs, writerToken) {
+    const normalized = this._normalizeTabs(tabs);
+    this.storage.setItem('tabs', JSON.stringify({
+      writer: writerToken || null,
+      tabs: normalized
+    }));
+    return normalized;
   }
   
   /**
@@ -18,17 +127,7 @@ export class TabManager {
    * This ensures we always work with a unique set of tab IDs
    */
   _readAndDeduplicateTabs() {
-    const tabs = JSON.parse(this.storage.getItem('tabs') || '[]');
-    // Remove duplicates by converting to Set and back to array
-    const uniqueTabs = [...new Set(tabs)];
-    // If duplicates were found, update storage immediately
-    if (uniqueTabs.length !== tabs.length) {
-      this.storage.setItem('tabs', JSON.stringify(uniqueTabs));
-      if (this.config.debug) {
-        console.log(`Removed ${tabs.length - uniqueTabs.length} duplicate tab ID(s)`);
-      }
-    }
-    return uniqueTabs;
+    return this._readTabState().tabs;
   }
   
   /**
@@ -60,7 +159,9 @@ export class TabManager {
     }
     
     // Update storage with only active tabs (already deduplicated)
-    this.storage.setItem('tabs', JSON.stringify(activeTabs));
+    if (this._tabsChanged(existingTabs, activeTabs)) {
+      this._writeTabState(activeTabs, this._nextWriteToken());
+    }
     return activeTabs;
   }
   
@@ -102,25 +203,19 @@ export class TabManager {
       
       // Check if candidate ID is already taken
       if (!currentTabs.includes(candidateID)) {
-        // ID is available, claim it atomically
-        currentTabs.push(candidateID);
-        // Sort to maintain order (helps with gap detection)
-        currentTabs.sort((a, b) => a - b);
-        this.storage.setItem('tabs', JSON.stringify(currentTabs));
+        // ID is available, claim it atomically using writer tokens
+        const updatedTabs = [...currentTabs, candidateID];
+        const writeToken = this._nextWriteToken();
+        this._writeTabState(updatedTabs, writeToken);
         
-        // Verify we successfully claimed it uniquely (re-read and deduplicate)
-        const verifyTabs = this._readAndDeduplicateTabs();
-        const count = verifyTabs.filter(id => id === candidateID).length;
-        if (count === 1) {
-          // Successfully claimed unique ID
+        // Verify we successfully claimed it uniquely by ensuring our write "won"
+        const verifyState = this._readTabState();
+        if (verifyState.writer === writeToken && verifyState.tabs.includes(candidateID)) {
           nextTabID = candidateID;
         } else {
-          // Another tab also claimed this ID, remove all instances and retry
-          const cleanedTabs = verifyTabs.filter(id => id !== candidateID);
-          this.storage.setItem('tabs', JSON.stringify(cleanedTabs));
           retryCount++;
           if (this.config.debug && retryCount < maxRetries) {
-            console.log(`Tab ID conflict detected after claim, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+            console.log(`Tab ID conflict detected after claim verification, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
           }
         }
       } else {
@@ -139,9 +234,11 @@ export class TabManager {
     this.tabID = nextTabID;
     
     // Start polling to keep tab alive
-    this.storage.setItem("tabpoll_" + this.tabID, Date.now().toString());
+    const pollKey = "tabpoll_" + this.tabID;
+    this.storage.setItem(pollKey, Date.now().toString());
     this.interval = setInterval(() => {
-      this.storage.setItem("tabpoll_" + this.tabID, Date.now().toString());
+      this._ensureTabStillRegistered();
+      this.storage.setItem(pollKey, Date.now().toString());
     }, this.config.tabs.pollInterval);
     
     if (this.config.debug) {
@@ -163,9 +260,42 @@ export class TabManager {
       // Read and deduplicate tabs before removing this tab's ID
       let existingTabs = this._readAndDeduplicateTabs();
       // Remove all instances of this tab ID (should only be one, but be safe)
-      existingTabs = existingTabs.filter(v => v !== this.tabID);
-      this.storage.setItem('tabs', JSON.stringify(existingTabs));
+      const filteredTabs = existingTabs.filter(v => v !== this.tabID);
+      if (this._tabsChanged(existingTabs, filteredTabs)) {
+        this._writeTabState(filteredTabs, this._nextWriteToken());
+      }
       this.storage.removeItem("tabpoll_" + this.tabID);
+    }
+  }
+  
+  _ensureTabStillRegistered() {
+    if (this.tabID === null || this.reinitializing) {
+      return;
+    }
+    const tabs = this._readAndDeduplicateTabs();
+    if (!tabs.includes(this.tabID)) {
+      if (this.config.debug) {
+        console.warn(`Lost ownership of tab ID ${this.tabID}, attempting recovery`);
+      }
+      this._recoverFromLostRegistration();
+    }
+  }
+  
+  _recoverFromLostRegistration() {
+    if (this.reinitializing) {
+      return;
+    }
+    this.reinitializing = true;
+    const previousTabID = this.tabID;
+    try {
+      this.cleanup();
+      this.tabID = null;
+      this.initialize();
+      if (this.config.debug) {
+        console.log(`Recovered tab ID. Old ID: ${previousTabID}, New ID: ${this.tabID}`);
+      }
+    } finally {
+      this.reinitializing = false;
     }
   }
 }

@@ -518,7 +518,7 @@ class CallManager extends EventEmitter {
       video: false
     });
     
-    this.localStreams.delete(peerName);
+    this._releaseLocalStreamForUser(peerName);
     this.latencyMetrics.delete(peerName);
     
     // Remove from group call mesh if in a group call
@@ -545,6 +545,8 @@ class CallManager extends EventEmitter {
     // (For group calls, we want to keep stats polling and mute states active)
     if (!hasRemainingCalls) {
       this._stopStatsPolling();
+      // Ensure any lingering local capture is stopped so the browser releases mic/cam access
+      this._releaseAllLocalStreams();
       // Clear group call mesh if no calls remain
       this.groupCallMesh.clear();
       this.groupCallType = null;
@@ -620,6 +622,50 @@ class CallManager extends EventEmitter {
       
       this._handleCallEnded(user);
     }
+  }
+
+  /**
+   * Stop every track on a MediaStream, logging (but not throwing) on failure
+   * @param {MediaStream} stream - Stream to stop
+   * @param {string} owner - Optional owner for logging context
+   * @private
+   */
+  _stopStreamTracks(stream, owner = 'unknown') {
+    if (!stream || typeof stream.getTracks !== 'function') {
+      return;
+    }
+    const tracks = stream.getTracks();
+    tracks.forEach(track => {
+      try {
+        track.stop();
+      } catch (err) {
+        console.warn(`CallManager: Failed to stop ${track?.kind || 'media'} track for ${owner}`, err);
+      }
+    });
+  }
+
+  /**
+   * Stop and remove the local stream associated with a user
+   * @param {string} user - User identifier
+   * @private
+   */
+  _releaseLocalStreamForUser(user) {
+    const stream = this.localStreams.get(user);
+    if (stream) {
+      this._stopStreamTracks(stream, user);
+    }
+    this.localStreams.delete(user);
+  }
+
+  /**
+   * Stop and clear all tracked local streams
+   * @private
+   */
+  _releaseAllLocalStreams() {
+    for (const [user, stream] of this.localStreams.entries()) {
+      this._stopStreamTracks(stream, user);
+    }
+    this.localStreams.clear();
   }
 
   /**
@@ -1203,7 +1249,7 @@ class CallManager extends EventEmitter {
     // Clear all state
     this.pendingCalls.clear();
     this.outgoingCalls.clear();
-    this.localStreams.clear();
+    this._releaseAllLocalStreams();
     this.latencyMetrics.clear();
     
     // Clear unified call state
