@@ -20,9 +20,7 @@ export {
   BaseMQTTRTCClient, 
   PromisefulMQTTRTCClient,
   RTCConnection,
-  Peer,
-  tabID,
-  defaultConfig
+  Peer
 } from './core/mqtt-rtc-client.js';
 
 export { SignedMQTTRTCClient } from './core/signed-client.js';
