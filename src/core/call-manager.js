@@ -694,21 +694,36 @@ class CallManager extends EventEmitter {
       
       try {
         const streamConnection = connection.streamConnection;
-        if (streamConnection && streamConnection.connectionState === 'connected') {
+        // Check if stream connection exists and is in a connected state
+        if (streamConnection && (streamConnection.iceConnectionState === 'connected' || streamConnection.iceConnectionState === 'completed')) {
           const stats = await streamConnection.getStats();
           
           let rtt = null;
           let packetLoss = null;
           let jitter = null;
           
-          // Parse stats
+          // Parse stats - WebRTC stats API structure
           for (const [id, report] of stats.entries()) {
+            // Try multiple ways to get RTT
             if (report.type === 'candidate-pair' && report.state === 'succeeded') {
-              if (report.currentRoundTripTime !== undefined) {
-                rtt = report.currentRoundTripTime * 1000; // Convert to ms
+              // currentRoundTripTime is in seconds, convert to ms
+              if (report.currentRoundTripTime !== undefined && report.currentRoundTripTime > 0) {
+                rtt = report.currentRoundTripTime * 1000;
+              } else if (report.roundTripTime !== undefined && report.roundTripTime > 0) {
+                rtt = report.roundTripTime * 1000;
               }
             }
             
+            // Also check transport stats for RTT
+            if (report.type === 'transport') {
+              if (report.currentRoundTripTime !== undefined && report.currentRoundTripTime > 0) {
+                rtt = report.currentRoundTripTime * 1000;
+              } else if (report.rtt !== undefined && report.rtt > 0) {
+                rtt = report.rtt * 1000;
+              }
+            }
+            
+            // Get audio stats
             if (report.type === 'inbound-rtp' && report.mediaType === 'audio') {
               if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
                 const totalPackets = report.packetsLost + report.packetsReceived;
@@ -716,11 +731,13 @@ class CallManager extends EventEmitter {
                   packetLoss = (report.packetsLost / totalPackets) * 100;
                 }
               }
-              if (report.jitter !== undefined) {
-                jitter = report.jitter * 1000; // Convert to ms
+              // jitter is already in seconds, convert to ms
+              if (report.jitter !== undefined && report.jitter > 0) {
+                jitter = report.jitter * 1000;
               }
             }
             
+            // Get video stats (for packet loss if audio didn't have it)
             if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
               if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
                 const totalPackets = report.packetsLost + report.packetsReceived;
@@ -734,11 +751,20 @@ class CallManager extends EventEmitter {
             }
           }
           
+          // Only update metrics if we got at least one valid value
+          // This prevents overwriting with null values
+          const currentMetrics = this.latencyMetrics.get(user) || { rtt: null, packetLoss: null, jitter: null };
+          const updatedMetrics = {
+            rtt: rtt !== null ? rtt : currentMetrics.rtt,
+            packetLoss: packetLoss !== null ? packetLoss : currentMetrics.packetLoss,
+            jitter: jitter !== null ? jitter : currentMetrics.jitter
+          };
+          
           // Store metrics
-          this.latencyMetrics.set(user, { rtt, packetLoss, jitter });
+          this.latencyMetrics.set(user, updatedMetrics);
           
           // Emit event
-          this.emit('metricsupdated', { user, metrics: { rtt, packetLoss, jitter } });
+          this.emit('metricsupdated', { user, metrics: updatedMetrics });
         }
       } catch (err) {
         console.warn(`Error collecting stats for ${user}:`, err);

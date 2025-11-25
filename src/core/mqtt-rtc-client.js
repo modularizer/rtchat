@@ -634,7 +634,7 @@ class BaseMQTTRTCClient extends EventEmitter {
 
   changeName(newName){
     let oldName = this.name;
-    const tabID = this.tabManager ? this.tabManager.getTabID() : (typeof tabID !== 'undefined' ? tabID : null);
+    const tabID = this.tabManager ? this.tabManager.getTabID() : null;
     this.name = newName + (tabID ? ('(' + tabID + ')') : '');
     
     // Use storage adapter if available, otherwise use localStorage
@@ -645,7 +645,7 @@ class BaseMQTTRTCClient extends EventEmitter {
       localStorage.setItem("name", newName);
     }
     
-    this.postPubliclyToMQTTServer("nameChange", {oldName: this.name, newName});
+    this.postPubliclyToMQTTServer("nameChange", {oldName: oldName, newName: this.name});
   }
   recordNameChange(oldName, newName){
     this.knownUsers[newName] = this.knownUsers[oldName];

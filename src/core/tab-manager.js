@@ -44,9 +44,22 @@ export class TabManager {
     
     existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
     
-    const maxTabID = existingTabs.length ? (Math.max(...existingTabs)) : -1;
-    const minTabID = existingTabs.length ? (Math.min(...existingTabs)) : -1;
-    this.tabID = (minTabID < 10) ? (maxTabID + 1) : 0;
+    // Find the next available tab ID
+    // First, try to find a gap (reuse IDs from closed tabs)
+    let nextTabID = 0;
+    if (existingTabs.length > 0) {
+      const sortedTabs = [...existingTabs].sort((a, b) => a - b);
+      // Look for first gap starting from 0
+      for (let i = 0; i < sortedTabs.length; i++) {
+        if (sortedTabs[i] !== i) {
+          nextTabID = i;
+          break;
+        }
+        nextTabID = i + 1;
+      }
+    }
+    
+    this.tabID = nextTabID;
     existingTabs.push(this.tabID);
     this.storage.setItem('tabs', JSON.stringify(existingTabs));
     
