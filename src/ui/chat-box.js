@@ -536,20 +536,6 @@ class ChatBox extends HTMLElement {
         background-color: #f8d7da;
         border-left: 3px solid #dc3545;
       }
-      .pinned-audio-call {
-        position: sticky;
-        top: 0;
-        z-index: 100;
-        background-color: #e3f2fd;
-        border-left: 4px solid #2196F3;
-        border-radius: 5px;
-        padding: 8px 12px;
-        margin-bottom: 10px;
-        font-size: 0.9em;
-        color: #1976D2;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-      }
-      .pinned-audio-call.hidden { display: none; }
       @media only screen and (max-width: 1000px) {
           #chat-container {
             min-width: 50vw !important;
@@ -650,6 +636,11 @@ class ChatBox extends HTMLElement {
     // UI state (minimal - most state is in managers)
     this.activeCallType = null;
     this.outgoingCalls = new Map(); // Track outgoing calls for cancellation
+    this.activeVideoCalls = new Set(); // Track active video calls
+    this.activeAudioCalls = new Set(); // Track active audio calls
+    this.localStreams = new Map(); // Track local streams for mute control
+    this.pendingCalls = new Map(); // Track pending incoming calls
+    this.pinnedAudioCallMessage = null; // Reference to pinned audio call message element
   }
 
   /**
@@ -1976,8 +1967,7 @@ class ChatBox extends HTMLElement {
       if (localStream instanceof MediaStream || remoteStream instanceof MediaStream) {
         this.audioDisplay.setStreams(sender, { localStream, remoteStream });
       }
-      // Update pinned audio call message
-      this._updatePinnedAudioCallMessage();
+      // Audio call info is handled by CallManagement, not messages
     } else {
       // Video call
       if (localStream instanceof MediaStream || remoteStream instanceof MediaStream) {
@@ -2062,6 +2052,13 @@ class ChatBox extends HTMLElement {
     if (this.callManagement && typeof this.callManagement._updateFromCallManager === 'function') {
       console.log("ChatBox._handleCallEnded: Updating CallManagement UI");
       this.callManagement._updateFromCallManager();
+    }
+    
+    // Ensure call management container is visible so users can start new calls
+    // Even when there are no active calls, the container should be visible for start call buttons
+    if (this.callManagementContainer) {
+      this.callManagementContainer.classList.remove('hidden');
+      this.callManagementContainer.style.display = 'flex';
     }
     
     // Also ensure video container is hidden if no active calls
@@ -2246,10 +2243,9 @@ class ChatBox extends HTMLElement {
    * @private
    */
   _updatePinnedAudioCallMessage() {
-    // Get active calls from CallManager (not legacy activeAudioCalls property)
+    // Get active audio calls from CallManager if available, otherwise use local state
     const activeCalls = this.callManager ? this.callManager.getActiveCalls() : {audio: new Set(), video: new Set()};
-    const audioCalls = activeCalls.audio || new Set();
-    const hasAudioCalls = audioCalls.size > 0;
+    const hasAudioCalls = activeCalls.audio.size > 0;
     
     if (hasAudioCalls) {
       // Create or update pinned message
@@ -2259,7 +2255,7 @@ class ChatBox extends HTMLElement {
         this.pinnedAudioCallMessage.className = 'pinned-audio-call';
         
         // Insert at the top of messages
-        const messagesEl = this.messages;
+        const messagesEl = this.messagesComponent ? this.messagesComponent.shadowRoot?.querySelector('#messages') || this.messagesComponent : null;
         if (messagesEl && messagesEl.firstChild) {
           messagesEl.insertBefore(this.pinnedAudioCallMessage, messagesEl.firstChild);
         } else if (messagesEl) {
@@ -2268,8 +2264,8 @@ class ChatBox extends HTMLElement {
       }
       
       // Update message content with list of active audio calls
-      const callList = Array.from(audioCalls).join(', ');
-      const callCount = audioCalls.size;
+      const callList = Array.from(activeCalls.audio).join(', ');
+      const callCount = activeCalls.audio.size;
       this.pinnedAudioCallMessage.textContent = `🔊 Audio call active${callCount > 1 ? 's' : ''} with: ${callList}`;
       this.pinnedAudioCallMessage.classList.remove('hidden');
     } else {
@@ -2284,6 +2280,7 @@ class ChatBox extends HTMLElement {
       }
     }
   }
+
 
   onCallConnected(sender, {localStream, remoteStream}) {
     // Stop ringing when call connects
@@ -2348,8 +2345,7 @@ class ChatBox extends HTMLElement {
       if (localStream instanceof MediaStream) {
         this.localStreams.set(sender, localStream);
       }
-      // Update pinned audio call message
-      this._updatePinnedAudioCallMessage();
+      // Audio call info is handled by CallManagement, not messages
       // Show call controls
       this._updateCallControlsVisibility();
     } else {

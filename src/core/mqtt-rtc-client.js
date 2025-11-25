@@ -946,7 +946,13 @@ class RTCConnection {
                 }
                 this.streamConnectionPromise.reject(e);
                 this.streamPromise.reject(e);
+                // Return null to indicate failure, don't throw (which would break the chain)
+                return null;
             }).then(streamConnection => {
+                // Only proceed if streamConnection exists (call was not rejected)
+                if (!streamConnection) {
+                    return;
+                }
                 streamConnection.setRemoteDescription(new RTCSessionDescription(offer))
                     .then(() => this.streamConnection.createAnswer())
                     .then(answer => this.streamConnection.setLocalDescription(answer))
@@ -959,6 +965,9 @@ class RTCConnection {
                             this.streamConnection.addIceCandidate(new RTCIceCandidate(this.pendingStreamIceCandidate));
                             this.pendingStreamIceCandidate = null;
                         }
+                    })
+                    .catch(err => {
+                        console.error("Error setting remote description or creating answer:", err);
                     });
             });
 

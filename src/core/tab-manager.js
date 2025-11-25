@@ -42,26 +42,66 @@ export class TabManager {
       }
     }
     
-    existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+    // Retry loop to handle race conditions when multiple tabs initialize simultaneously
+    const maxRetries = 10;
+    let retryCount = 0;
+    let nextTabID = null;
     
-    // Find the next available tab ID
-    // First, try to find a gap (reuse IDs from closed tabs)
-    let nextTabID = 0;
-    if (existingTabs.length > 0) {
-      const sortedTabs = [...existingTabs].sort((a, b) => a - b);
-      // Look for first gap starting from 0
-      for (let i = 0; i < sortedTabs.length; i++) {
-        if (sortedTabs[i] !== i) {
-          nextTabID = i;
-          break;
+    while (retryCount < maxRetries && nextTabID === null) {
+      // Re-read tabs list to get the most current state
+      existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+      
+      // Find the next available tab ID
+      // First, try to find a gap (reuse IDs from closed tabs)
+      let candidateID = 0;
+      if (existingTabs.length > 0) {
+        const sortedTabs = [...existingTabs].sort((a, b) => a - b);
+        // Look for first gap starting from 0
+        for (let i = 0; i < sortedTabs.length; i++) {
+          if (sortedTabs[i] !== i) {
+            candidateID = i;
+            break;
+          }
+          candidateID = i + 1;
         }
-        nextTabID = i + 1;
+      }
+      
+      // Verify the candidate ID is not already taken (re-read to check for race condition)
+      const currentTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+      if (!currentTabs.includes(candidateID)) {
+        // ID is available, claim it
+        currentTabs.push(candidateID);
+        this.storage.setItem('tabs', JSON.stringify(currentTabs));
+        
+        // Verify we successfully claimed it (check for race condition where another tab also added it)
+        const verifyTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+        const count = verifyTabs.filter(id => id === candidateID).length;
+        if (count === 1) {
+          // Successfully claimed unique ID
+          nextTabID = candidateID;
+        } else {
+          // Another tab also claimed this ID, remove our claim and retry
+          const cleanedTabs = verifyTabs.filter(id => id !== candidateID);
+          this.storage.setItem('tabs', JSON.stringify(cleanedTabs));
+          retryCount++;
+          if (this.config.debug && retryCount < maxRetries) {
+            console.log(`Tab ID conflict detected after claim, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+          }
+        }
+      } else {
+        // ID was taken by another tab, retry
+        retryCount++;
+        if (this.config.debug && retryCount < maxRetries) {
+          console.log(`Tab ID conflict detected, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+        }
       }
     }
     
+    if (nextTabID === null) {
+      throw new Error(`Failed to acquire unique tab ID after ${maxRetries} attempts`);
+    }
+    
     this.tabID = nextTabID;
-    existingTabs.push(this.tabID);
-    this.storage.setItem('tabs', JSON.stringify(existingTabs));
     
     // Start polling to keep tab alive
     this.storage.setItem("tabpoll_" + this.tabID, Date.now().toString());

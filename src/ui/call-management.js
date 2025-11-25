@@ -158,6 +158,7 @@ class CallManagement {
       }
     }
     
+    this.buttonsContainer = this.container.querySelector('#call-buttons-container');
     this.callInfoContainer = this.container.querySelector('#call-info-container');
     this.callControlsContainer = this.container.querySelector('#call-controls-container');
     this.muteMicBtn = this.container.querySelector('#call-mute-mic-btn');
@@ -294,13 +295,19 @@ class CallManagement {
    * @private
    */
   _setStateInactive() {
-    // Set to inactive state - container remains in DOM, just not active
-    // Remove active class (CSS will handle hiding via #call-management.active rule)
+    // Set to inactive state - container remains in DOM and visible for start call buttons
+    // The container should be visible so users can start new calls
     this.container.classList.remove('active');
-    // Don't add 'hidden' class - let CSS handle visibility via .active class
-    this.container.style.display = '';
+    this.container.classList.remove('hidden');
+    // Ensure container is visible (buttons should be shown)
+    this.container.style.display = 'flex';
     
-    // Hide all sub-containers (non-destructive - just hide, don't remove)
+    // Show buttons container (for start call buttons)
+    if (this.buttonsContainer) {
+      this.buttonsContainer.style.display = 'flex';
+    }
+    
+    // Hide call controls and info containers (only show when active)
     if (this.callControlsContainer) {
       this.callControlsContainer.classList.remove('active');
       this.callControlsContainer.style.display = 'none';
@@ -326,7 +333,7 @@ class CallManagement {
     // Reset button states (non-destructive)
     this._updateButtonStates();
     
-    // Container remains in DOM and ready to be shown again when .active class is added
+    // Container remains in DOM and visible with start call buttons ready
     // All sub-containers remain in DOM, just hidden
   }
 
