@@ -109,8 +109,8 @@ class ChatBox extends HTMLElement {
         <chat-header id="chat-header-component"></chat-header>
         <div id="call-management">
           <div id="call-buttons-container">
-            <button id="audio-call-button" class="call-button audio-call" title="Start audio call">Audio</button>
-            <button id="video-call-button" class="call-button video-call" title="Start video call">Video</button>
+            <button id="audio-call-button" class="call-button audio-call" title="Start audio call">Start Audio Call</button>
+            <button id="video-call-button" class="call-button video-call" title="Start video call">Start Video Call</button>
           </div>
           <div id="call-info-container"></div>
           <div id="call-controls-container">

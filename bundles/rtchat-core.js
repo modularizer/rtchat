@@ -962,13 +962,66 @@ var RTChatCore = (function (exports) {
         }
       }
       
-      existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+      // Retry loop to handle race conditions when multiple tabs initialize simultaneously
+      const maxRetries = 10;
+      let retryCount = 0;
+      let nextTabID = null;
       
-      const maxTabID = existingTabs.length ? (Math.max(...existingTabs)) : -1;
-      const minTabID = existingTabs.length ? (Math.min(...existingTabs)) : -1;
-      this.tabID = (minTabID < 10) ? (maxTabID + 1) : 0;
-      existingTabs.push(this.tabID);
-      this.storage.setItem('tabs', JSON.stringify(existingTabs));
+      while (retryCount < maxRetries && nextTabID === null) {
+        // Re-read tabs list to get the most current state
+        existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+        
+        // Find the next available tab ID
+        // First, try to find a gap (reuse IDs from closed tabs)
+        let candidateID = 0;
+        if (existingTabs.length > 0) {
+          const sortedTabs = [...existingTabs].sort((a, b) => a - b);
+          // Look for first gap starting from 0
+          for (let i = 0; i < sortedTabs.length; i++) {
+            if (sortedTabs[i] !== i) {
+              candidateID = i;
+              break;
+            }
+            candidateID = i + 1;
+          }
+        }
+        
+        // Verify the candidate ID is not already taken (re-read to check for race condition)
+        const currentTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+        if (!currentTabs.includes(candidateID)) {
+          // ID is available, claim it
+          currentTabs.push(candidateID);
+          this.storage.setItem('tabs', JSON.stringify(currentTabs));
+          
+          // Verify we successfully claimed it (check for race condition where another tab also added it)
+          const verifyTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+          const count = verifyTabs.filter(id => id === candidateID).length;
+          if (count === 1) {
+            // Successfully claimed unique ID
+            nextTabID = candidateID;
+          } else {
+            // Another tab also claimed this ID, remove our claim and retry
+            const cleanedTabs = verifyTabs.filter(id => id !== candidateID);
+            this.storage.setItem('tabs', JSON.stringify(cleanedTabs));
+            retryCount++;
+            if (this.config.debug && retryCount < maxRetries) {
+              console.log(`Tab ID conflict detected after claim, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+            }
+          }
+        } else {
+          // ID was taken by another tab, retry
+          retryCount++;
+          if (this.config.debug && retryCount < maxRetries) {
+            console.log(`Tab ID conflict detected, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+          }
+        }
+      }
+      
+      if (nextTabID === null) {
+        throw new Error(`Failed to acquire unique tab ID after ${maxRetries} attempts`);
+      }
+      
+      this.tabID = nextTabID;
       
       // Start polling to keep tab alive
       this.storage.setItem("tabpoll_" + this.tabID, Date.now().toString());
@@ -1652,7 +1705,21 @@ var RTChatCore = (function (exports) {
     endCallWithUser(user){
       console.log("Ending call with " + user);
       if (this.rtcConnections[user]){
-          this.rtcConnections[user].endCall();
+          try {
+              this.rtcConnections[user].endCall();
+              console.log("Sent endcall message to " + user + " via RTC data channel");
+          } catch (err) {
+              console.warn("Failed to send endcall via RTC channel, trying MQTT fallback:", err);
+              // Fallback: send via MQTT if RTC channel fails
+              try {
+                  this.sendOverRTC("endcall", null, user);
+                  console.log("Sent endcall message to " + user + " via MQTT fallback");
+              } catch (mqttErr) {
+                  console.error("Failed to send endcall message to " + user + " via both RTC and MQTT:", mqttErr);
+              }
+          }
+      } else {
+          console.warn("No RTC connection found for " + user + ", cannot send endcall message");
       }
     }
     callFromUser(user, callInfo, initiatedCall, promises){
@@ -1674,9 +1741,10 @@ var RTChatCore = (function (exports) {
       }
     }
     oncallended(user){
-      console.log("Call ended with " + user);
+      console.log("BaseMQTTRTCClient.oncallended: Call ended with " + user);
       // Emit the callended event so UI components can react
       this.emit('callended', user);
+      console.log("BaseMQTTRTCClient.oncallended: Emitted 'callended' event for " + user);
     }
     acceptCallFromUser(user, callInfo, promises){
        return Promise.resolve(true);
@@ -1756,8 +1824,8 @@ var RTChatCore = (function (exports) {
     }
 
     changeName(newName){
-      this.name;
-      const tabID = this.tabManager ? this.tabManager.getTabID() : (typeof tabID !== 'undefined' ? tabID : null);
+      let oldName = this.name;
+      const tabID = this.tabManager ? this.tabManager.getTabID() : null;
       this.name = newName + (tabID ? ('(' + tabID + ')') : '');
       
       // Use storage adapter if available, otherwise use localStorage
@@ -1768,7 +1836,7 @@ var RTChatCore = (function (exports) {
         localStorage.setItem("name", newName);
       }
       
-      this.postPubliclyToMQTTServer("nameChange", {oldName: this.name, newName});
+      this.postPubliclyToMQTTServer("nameChange", {oldName: oldName, newName: this.name});
     }
     recordNameChange(oldName, newName){
       this.knownUsers[newName] = this.knownUsers[oldName];
@@ -1894,6 +1962,7 @@ var RTChatCore = (function (exports) {
       }
       registerDataChannel(dataChannel){
           dataChannel.onmessage = ((e) => {
+              console.log("RTCConnection.registerDataChannel: Received message on channel '" + dataChannel.label + "' from " + this.target, e.data);
               this.onmessage(e, dataChannel.label);
           }).bind(this);
           dataChannel.onerror = ((e) => {
@@ -1901,6 +1970,7 @@ var RTChatCore = (function (exports) {
               this.ondatachannelerror(e, dataChannel.label);
           }).bind(this);
           dataChannel.onopen = ((e) => {
+              console.log("RTCConnection.registerDataChannel: Data channel '" + dataChannel.label + "' opened for " + this.target);
               this.dataChannelDeferredPromises[dataChannel.label].resolve(e);
           }).bind(this);
           this.dataChannels[dataChannel.label] = dataChannel;
@@ -2067,7 +2137,13 @@ var RTChatCore = (function (exports) {
                   }
                   this.streamConnectionPromise.reject(e);
                   this.streamPromise.reject(e);
+                  // Return null to indicate failure, don't throw (which would break the chain)
+                  return null;
               }).then(streamConnection => {
+                  // Only proceed if streamConnection exists (call was not rejected)
+                  if (!streamConnection) {
+                      return;
+                  }
                   streamConnection.setRemoteDescription(new RTCSessionDescription(offer))
                       .then(() => this.streamConnection.createAnswer())
                       .then(answer => this.streamConnection.setLocalDescription(answer))
@@ -2080,6 +2156,9 @@ var RTChatCore = (function (exports) {
                               this.streamConnection.addIceCandidate(new RTCIceCandidate(this.pendingStreamIceCandidate));
                               this.pendingStreamIceCandidate = null;
                           }
+                      })
+                      .catch(err => {
+                          console.error("Error setting remote description or creating answer:", err);
                       });
               });
 
@@ -2097,20 +2176,44 @@ var RTChatCore = (function (exports) {
                   }
               }
           }else if (channel === "endcall"){
+              console.log("RTCConnection.onmessage: Received endcall message from " + this.target);
               this._closeCall();
           }else {
               this.mqttClient.onrtcmessage(channel, event.data, this.target);
           }
       }
       endCall(){
-          this.send("endcall", null);
+          console.log("RTCConnection.endCall: Sending endcall message to " + this.target);
+          try {
+              const sendResult = this.send("endcall", null);
+              // send() can return a Promise if channel is not ready
+              if (sendResult && typeof sendResult.then === 'function') {
+                  sendResult
+                      .then(() => {
+                          console.log("RTCConnection.endCall: Successfully sent endcall message to " + this.target);
+                      })
+                      .catch((err) => {
+                          console.error("RTCConnection.endCall: Failed to send endcall message (async):", err);
+                      });
+              } else {
+                  console.log("RTCConnection.endCall: Successfully sent endcall message to " + this.target);
+              }
+          } catch (err) {
+              console.error("RTCConnection.endCall: Failed to send endcall message (sync):", err);
+              // Still close the call even if send failed
+          }
           this._closeCall();
       }
       _closeCall(){
+          console.log("RTCConnection._closeCall: Closing call with " + this.target);
           if (this.streamConnection){
               this.streamConnection.close();
-              this.localStream.getTracks().forEach(track => track.stop());
-              this.remoteStream.getTracks().forEach(track => track.stop());
+              if (this.localStream){
+                  this.localStream.getTracks().forEach(track => track.stop());
+              }
+              if (this.remoteStream){
+                  this.remoteStream.getTracks().forEach(track => track.stop());
+              }
               this.remoteStream = null;
               this.localStream = null;
           }
@@ -2125,7 +2228,12 @@ var RTChatCore = (function (exports) {
           this.callEndPromise = new DeferredPromise();
           this.callPromises = {start: this.streamPromise.promise, end: this.callEndPromise.promise};
 
-          this.mqttClient.oncallended(this.target);
+          if (this.mqttClient && this.mqttClient.oncallended){
+              console.log("RTCConnection._closeCall: Calling mqttClient.oncallended for " + this.target);
+              this.mqttClient.oncallended(this.target);
+          } else {
+              console.warn("RTCConnection._closeCall: mqttClient.oncallended is not defined!");
+          }
       }
 
       onReceivedIceCandidate(data) {
@@ -2493,8 +2601,18 @@ var RTChatCore = (function (exports) {
               return super.on(rtcevent, handler);
           }else if (rtcevent === "callended"){
               // Special case: callended sets oncallended
-              this.oncallended = handler.bind(this);
-              // Also register as event listener
+              // Store the original oncallended method that emits the event
+              const originalOnCallEnded = this.oncallended;
+              // Create a wrapper that calls the original (to emit event)
+              // The handler will be called via the event listener registered below
+              this.oncallended = (user) => {
+                  // Call the original method to emit the 'callended' event
+                  // This will trigger all registered event listeners including the handler
+                  if (originalOnCallEnded) {
+                      originalOnCallEnded.call(this, user);
+                  }
+              };
+              // Register handler as event listener so it gets called when event is emitted
               return super.on(rtcevent, handler);
           }else if (rtcevent === "question"){
               // Question handlers are registered via addQuestionHandler
@@ -3776,7 +3894,10 @@ var RTChatCore = (function (exports) {
       if (this.rtcClient.on) {
         this.rtcClient.on('call', this._handleIncomingCall);
         this.rtcClient.on('callconnected', this._handleCallConnected);
-        this.rtcClient.on('callended', this._handleCallEnded);
+        this.rtcClient.on('callended', (user) => {
+          console.log("CallManager: Received 'callended' event from RTC client for " + user);
+          this._handleCallEnded(user);
+        });
         this.rtcClient.on('disconnectedfrompeer', (user) => {
           this._handleDisconnectedFromUser(user);
         });
@@ -3911,7 +4032,35 @@ var RTChatCore = (function (exports) {
      * @private
      */
     _handleCallEnded(peerName) {
-      // Clear timeouts
+      console.log("CallManager._handleCallEnded: Called for " + peerName);
+      // Check if call is already ended (idempotent)
+      const currentState = this.callState.getUserState(peerName);
+      if (currentState && currentState.status === 'inactive') {
+        // Already ended, skip
+        console.log("CallManager._handleCallEnded: Call already ended for " + peerName + ", skipping");
+        return;
+      }
+      
+      // CRITICAL: Collect all users with active/pending calls BEFORE updating any state
+      // This ensures we get the complete list of all calls that need to be ended
+      const activeCallsBefore = this.callState.getActiveCalls();
+      const pendingCallsBefore = this.callState.getPendingCalls();
+      const allUsersToEnd = new Set([
+        ...activeCallsBefore.audio,
+        ...activeCallsBefore.video,
+        ...pendingCallsBefore,
+        ...this.outgoingCalls.keys()
+      ]);
+      
+      console.log("CallManager._handleCallEnded: Found calls to end:", {
+        activeAudio: Array.from(activeCallsBefore.audio),
+        activeVideo: Array.from(activeCallsBefore.video),
+        pending: Array.from(pendingCallsBefore),
+        outgoing: Array.from(this.outgoingCalls.keys()),
+        allUsersToEnd: Array.from(allUsersToEnd)
+      });
+      
+      // Clear timeouts for the primary peer
       const pendingCall = this.pendingCalls.get(peerName);
       if (pendingCall && pendingCall.timeoutId) {
         clearTimeout(pendingCall.timeoutId);
@@ -3924,7 +4073,7 @@ var RTChatCore = (function (exports) {
       }
       this.outgoingCalls.delete(peerName);
       
-      // Update unified call state
+      // Update unified call state for the primary peer
       this.callState.setUserState(peerName, {
         status: 'inactive',
         audio: false,
@@ -3934,16 +4083,50 @@ var RTChatCore = (function (exports) {
       this.localStreams.delete(peerName);
       this.latencyMetrics.delete(peerName);
       
-      // Stop stats polling if no active calls
-      const activeCalls = this.callState.getActiveCalls();
-      if (activeCalls.video.size === 0 && activeCalls.audio.size === 0) {
-        this._stopStatsPolling();
-        // Reset mute states
-        this.muteState = { mic: false, speakers: false, video: false };
+      // CRITICAL: Emit callended event for the primary call - this must always happen
+      this.emit('callended', { peerName });
+      
+      // End all other remaining calls (excluding the one we just ended)
+      for (const otherUser of allUsersToEnd) {
+        if (otherUser !== peerName) {
+          // End call with RTC client to send message
+          if (this.rtcClient && this.rtcClient.endCallWithUser) {
+            try {
+              this.rtcClient.endCallWithUser(otherUser);
+            } catch (err) {
+              console.warn(`Error ending call with ${otherUser}:`, err);
+            }
+          }
+          
+          // Update state for other user
+          const otherPendingCall = this.pendingCalls.get(otherUser);
+          if (otherPendingCall && otherPendingCall.timeoutId) {
+            clearTimeout(otherPendingCall.timeoutId);
+          }
+          this.pendingCalls.delete(otherUser);
+          
+          const otherOutgoingCall = this.outgoingCalls.get(otherUser);
+          if (otherOutgoingCall && otherOutgoingCall.timeoutId) {
+            clearTimeout(otherOutgoingCall.timeoutId);
+          }
+          this.outgoingCalls.delete(otherUser);
+          
+          this.callState.setUserState(otherUser, {
+            status: 'inactive',
+            audio: false,
+            video: false
+          });
+          this.localStreams.delete(otherUser);
+          this.latencyMetrics.delete(otherUser);
+          
+          // CRITICAL: Emit callended event for each other user
+          this.emit('callended', { peerName: otherUser });
+        }
       }
       
-      // Emit event
-      this.emit('callended', { peerName });
+      // Stop stats polling and reset mute states (all calls are now ended)
+      this._stopStatsPolling();
+      this.muteState = { mic: false, speakers: false, video: false };
     }
 
     /**
@@ -3953,11 +4136,12 @@ var RTChatCore = (function (exports) {
      * @private
      */
     _handleCallTimeout(peerName, direction) {
-      // Clear pending/outgoing call
-      this.pendingCalls.delete(peerName);
-      this.outgoingCalls.delete(peerName);
+      // Stop ringing if ringer is provided
+      if (this.ringer && typeof this.ringer.stop === 'function') {
+        this.ringer.stop();
+      }
       
-      // End call with RTC client
+      // End call with RTC client to send message
       if (this.rtcClient && this.rtcClient.endCallWithUser) {
         try {
           this.rtcClient.endCallWithUser(peerName);
@@ -3966,22 +4150,10 @@ var RTChatCore = (function (exports) {
         }
       }
       
-      // Update unified call state
-      this.callState.setUserState(peerName, {
-        status: 'inactive',
-        audio: false,
-        video: false
-      });
+      // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
+      this._handleCallEnded(peerName);
       
-      this.localStreams.delete(peerName);
-      this.latencyMetrics.delete(peerName);
-      
-      // Stop ringing if ringer is provided
-      if (this.ringer && typeof this.ringer.stop === 'function') {
-        this.ringer.stop();
-      }
-      
-      // Emit event
+      // Emit timeout event for UI notifications
       this.emit('calltimeout', { peerName, direction });
       
       // Use callUI if provided
@@ -4099,8 +4271,12 @@ var RTChatCore = (function (exports) {
         
         // Check if call was rejected
         if (err === "Call rejected" || err?.message === "Call rejected") {
+          // CRITICAL: When call is rejected, end ALL calls and emit events
+          this._handleCallEnded(user);
           this.emit('callrejected', { user });
         } else {
+          // For other errors, also end all calls to ensure clean state
+          this._handleCallEnded(user);
           this.emit('callerror', { user, error: err });
         }
         
@@ -4113,6 +4289,8 @@ var RTChatCore = (function (exports) {
      * @param {string} user - Name of the user
      */
     endCall(user) {
+      // First, tell RTC client to end the call and send "endcall" message to peer
+      // This must happen while the call is still active so the message can be sent
       if (this.rtcClient && this.rtcClient.endCallWithUser) {
         try {
           this.rtcClient.endCallWithUser(user);
@@ -4121,7 +4299,9 @@ var RTChatCore = (function (exports) {
         }
       }
       
-      // Cleanup will happen via callended event
+      // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
+      // This ensures when any call ends, all other calls are also ended
+      this._handleCallEnded(user);
     }
 
     /**
@@ -4302,21 +4482,36 @@ var RTChatCore = (function (exports) {
         
         try {
           const streamConnection = connection.streamConnection;
-          if (streamConnection && streamConnection.connectionState === 'connected') {
+          // Check if stream connection exists and is in a connected state
+          if (streamConnection && (streamConnection.iceConnectionState === 'connected' || streamConnection.iceConnectionState === 'completed')) {
             const stats = await streamConnection.getStats();
             
             let rtt = null;
             let packetLoss = null;
             let jitter = null;
             
-            // Parse stats
+            // Parse stats - WebRTC stats API structure
             for (const [id, report] of stats.entries()) {
+              // Try multiple ways to get RTT
               if (report.type === 'candidate-pair' && report.state === 'succeeded') {
-                if (report.currentRoundTripTime !== undefined) {
-                  rtt = report.currentRoundTripTime * 1000; // Convert to ms
+                // currentRoundTripTime is in seconds, convert to ms
+                if (report.currentRoundTripTime !== undefined && report.currentRoundTripTime > 0) {
+                  rtt = report.currentRoundTripTime * 1000;
+                } else if (report.roundTripTime !== undefined && report.roundTripTime > 0) {
+                  rtt = report.roundTripTime * 1000;
                 }
               }
               
+              // Also check transport stats for RTT
+              if (report.type === 'transport') {
+                if (report.currentRoundTripTime !== undefined && report.currentRoundTripTime > 0) {
+                  rtt = report.currentRoundTripTime * 1000;
+                } else if (report.rtt !== undefined && report.rtt > 0) {
+                  rtt = report.rtt * 1000;
+                }
+              }
+              
+              // Get audio stats
               if (report.type === 'inbound-rtp' && report.mediaType === 'audio') {
                 if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
                   const totalPackets = report.packetsLost + report.packetsReceived;
@@ -4324,11 +4519,13 @@ var RTChatCore = (function (exports) {
                     packetLoss = (report.packetsLost / totalPackets) * 100;
                   }
                 }
-                if (report.jitter !== undefined) {
-                  jitter = report.jitter * 1000; // Convert to ms
+                // jitter is already in seconds, convert to ms
+                if (report.jitter !== undefined && report.jitter > 0) {
+                  jitter = report.jitter * 1000;
                 }
               }
               
+              // Get video stats (for packet loss if audio didn't have it)
               if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
                 if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
                   const totalPackets = report.packetsLost + report.packetsReceived;
@@ -4342,11 +4539,20 @@ var RTChatCore = (function (exports) {
               }
             }
             
+            // Only update metrics if we got at least one valid value
+            // This prevents overwriting with null values
+            const currentMetrics = this.latencyMetrics.get(user) || { rtt: null, packetLoss: null, jitter: null };
+            const updatedMetrics = {
+              rtt: rtt !== null ? rtt : currentMetrics.rtt,
+              packetLoss: packetLoss !== null ? packetLoss : currentMetrics.packetLoss,
+              jitter: jitter !== null ? jitter : currentMetrics.jitter
+            };
+            
             // Store metrics
-            this.latencyMetrics.set(user, { rtt, packetLoss, jitter });
+            this.latencyMetrics.set(user, updatedMetrics);
             
             // Emit event
-            this.emit('metricsupdated', { user, metrics: { rtt, packetLoss, jitter } });
+            this.emit('metricsupdated', { user, metrics: updatedMetrics });
           }
         } catch (err) {
           console.warn(`Error collecting stats for ${user}:`, err);
@@ -5026,73 +5232,74 @@ var RTChatCore = (function (exports) {
   }
 
   /**
-   * AudioControllerInterface - Interface for audio control components
+   * RingerInterface - Interface for ringtone/audio notification components
    * 
-   * This interface defines methods for controlling audio streams (mute mic, mute speakers).
-   * Implement this if you want to provide audio controls.
+   * This interface defines methods for playing ringtones (e.g., for incoming calls).
+   * Implement this if you want to provide custom ringtone behavior.
    * 
-   * @interface AudioControllerInterface
+   * @interface RingerInterface
    */
-  class AudioControllerInterface {
+  class RingerInterface {
     /**
-     * Mute or unmute the microphone
-     * @param {boolean} muted - Whether to mute (true) or unmute (false)
-     * @param {Map<string, MediaStream>} localStreams - Map of user -> local MediaStream
+     * Start playing the ringtone
+     * @returns {Promise} Promise that resolves when ringtone starts
      */
-    setMicMuted(muted, localStreams) {
-      // Optional - no-op by default
+    start() {
+      throw new Error('start must be implemented');
     }
 
     /**
-     * Mute or unmute the speakers
-     * @param {boolean} muted - Whether to mute (true) or unmute (false)
-     * @param {Map<string, HTMLMediaElement>} remoteAudioElements - Map of user -> audio element
+     * Stop playing the ringtone
      */
-    setSpeakersMuted(muted, remoteAudioElements) {
-      // Optional - no-op by default
+    stop() {
+      throw new Error('stop must be implemented');
     }
 
     /**
-     * Get current mic mute state
-     * @returns {boolean} Whether mic is muted
+     * Check if ringtone is currently playing
+     * @returns {boolean} Whether ringtone is playing
      */
-    isMicMuted() {
-      return false;
-    }
-
-    /**
-     * Get current speakers mute state
-     * @returns {boolean} Whether speakers are muted
-     */
-    isSpeakersMuted() {
+    isRinging() {
       return false;
     }
   }
 
   /**
-   * VideoControllerInterface - Interface for video control components
+   * NotificationInterface - Interface for notification components
    * 
-   * This interface defines methods for controlling video streams (hide/show video).
-   * Implement this if you want to provide video controls.
+   * This interface defines methods for showing notifications (e.g., connection sounds, alerts).
+   * Implement this if you want to provide custom notification behavior.
    * 
-   * @interface VideoControllerInterface
+   * @interface NotificationInterface
    */
-  class VideoControllerInterface {
+  class NotificationInterface {
     /**
-     * Hide or show video
-     * @param {boolean} hidden - Whether to hide (true) or show (false) video
-     * @param {Map<string, MediaStream>} localStreams - Map of user -> local MediaStream
+     * Play a ping/connection sound
+     * @returns {Promise} Promise that resolves when sound plays
      */
-    setVideoHidden(hidden, localStreams) {
+    ping() {
       // Optional - no-op by default
+      return Promise.resolve();
     }
 
     /**
-     * Get current video hidden state
-     * @returns {boolean} Whether video is hidden
+     * Play a beep sound
+     * @returns {Promise} Promise that resolves when sound plays
      */
-    isVideoHidden() {
-      return false;
+    beep() {
+      // Optional - no-op by default
+      return Promise.resolve();
+    }
+
+    /**
+     * Show a visual notification (e.g., browser notification)
+     * @param {string} title - Notification title
+     * @param {Object} options - Notification options {body, icon, etc.}
+     * @returns {Promise} Promise that resolves when notification is shown
+     */
+    showNotification(title, options = {}) {
+      // Optional - no-op by default
+      return Promise.resolve();
     }
   }
 
@@ -5185,74 +5392,73 @@ var RTChatCore = (function (exports) {
   }
 
   /**
-   * RingerInterface - Interface for ringtone/audio notification components
+   * AudioControllerInterface - Interface for audio control components
    * 
-   * This interface defines methods for playing ringtones (e.g., for incoming calls).
-   * Implement this if you want to provide custom ringtone behavior.
+   * This interface defines methods for controlling audio streams (mute mic, mute speakers).
+   * Implement this if you want to provide audio controls.
    * 
-   * @interface RingerInterface
+   * @interface AudioControllerInterface
    */
-  class RingerInterface {
+  class AudioControllerInterface {
     /**
-     * Start playing the ringtone
-     * @returns {Promise} Promise that resolves when ringtone starts
+     * Mute or unmute the microphone
+     * @param {boolean} muted - Whether to mute (true) or unmute (false)
+     * @param {Map<string, MediaStream>} localStreams - Map of user -> local MediaStream
      */
-    start() {
-      throw new Error('start must be implemented');
+    setMicMuted(muted, localStreams) {
+      // Optional - no-op by default
     }
 
     /**
-     * Stop playing the ringtone
+     * Mute or unmute the speakers
+     * @param {boolean} muted - Whether to mute (true) or unmute (false)
+     * @param {Map<string, HTMLMediaElement>} remoteAudioElements - Map of user -> audio element
      */
-    stop() {
-      throw new Error('stop must be implemented');
+    setSpeakersMuted(muted, remoteAudioElements) {
+      // Optional - no-op by default
     }
 
     /**
-     * Check if ringtone is currently playing
-     * @returns {boolean} Whether ringtone is playing
+     * Get current mic mute state
+     * @returns {boolean} Whether mic is muted
      */
-    isRinging() {
+    isMicMuted() {
+      return false;
+    }
+
+    /**
+     * Get current speakers mute state
+     * @returns {boolean} Whether speakers are muted
+     */
+    isSpeakersMuted() {
       return false;
     }
   }
 
   /**
-   * NotificationInterface - Interface for notification components
+   * VideoControllerInterface - Interface for video control components
    * 
-   * This interface defines methods for showing notifications (e.g., connection sounds, alerts).
-   * Implement this if you want to provide custom notification behavior.
+   * This interface defines methods for controlling video streams (hide/show video).
+   * Implement this if you want to provide video controls.
    * 
-   * @interface NotificationInterface
+   * @interface VideoControllerInterface
    */
-  class NotificationInterface {
+  class VideoControllerInterface {
     /**
-     * Play a ping/connection sound
-     * @returns {Promise} Promise that resolves when sound plays
+     * Hide or show video
+     * @param {boolean} hidden - Whether to hide (true) or show (false) video
+     * @param {Map<string, MediaStream>} localStreams - Map of user -> local MediaStream
      */
-    ping() {
+    setVideoHidden(hidden, localStreams) {
       // Optional - no-op by default
-      return Promise.resolve();
     }
 
     /**
-     * Play a beep sound
-     * @returns {Promise} Promise that resolves when sound plays
+     * Get current video hidden state
+     * @returns {boolean} Whether video is hidden
      */
-    beep() {
-      // Optional - no-op by default
-      return Promise.resolve();
-    }
-
-    /**
-     * Show a visual notification (e.g., browser notification)
-     * @param {string} title - Notification title
-     * @param {Object} options - Notification options {body, icon, etc.}
-     * @returns {Promise} Promise that resolves when notification is shown
-     */
-    showNotification(title, options = {}) {
-      // Optional - no-op by default
-      return Promise.resolve();
+    isVideoHidden() {
+      return false;
     }
   }
 
@@ -5390,6 +5596,1878 @@ var RTChatCore = (function (exports) {
       }
       
       return validated;
+    }
+  }
+
+  /**
+   * UIComponentBase - Abstract base class for UI components that extend HTMLElement
+   * 
+   * This base class provides common functionality for all UI components:
+   * - Shadow DOM setup
+   * - Configuration management
+   * - Lifecycle hooks
+   * - Event handling utilities
+   * 
+   * All UI components that extend HTMLElement should extend this class.
+   * 
+   * @abstract
+   */
+  class UIComponentBase extends HTMLElement {
+    /**
+     * Create a new UIComponentBase instance
+     * @param {Object} config - Configuration object
+     */
+    constructor(config = {}) {
+      super();
+      
+      // Store configuration
+      this.config = { ...config };
+      
+      // Initialize shadow DOM (can be overridden)
+      this._initShadowDOM();
+      
+      // Setup lifecycle
+      this._initialized = false;
+    }
+
+    /**
+     * Initialize shadow DOM (can be overridden by subclasses)
+     * @protected
+     */
+    _initShadowDOM() {
+      // Default: open shadow DOM
+      // Subclasses can override to use closed shadow DOM or no shadow DOM
+      this.attachShadow({ mode: 'open' });
+    }
+
+    /**
+     * Called when element is connected to DOM
+     * Subclasses should override connectedCallback() and call super.connectedCallback()
+     */
+    connectedCallback() {
+      if (!this._initialized) {
+        this._initialize();
+        this._initialized = true;
+      }
+    }
+
+    /**
+     * Called when element is disconnected from DOM
+     * Subclasses should override disconnectedCallback() and call super.disconnectedCallback()
+     */
+    disconnectedCallback() {
+      // Cleanup can be done here
+    }
+
+    /**
+     * Initialize the component
+     * Subclasses should override this method
+     * @protected
+     */
+    _initialize() {
+      // Override in subclasses
+    }
+
+    /**
+     * Get configuration value
+     * @param {string} key - Configuration key
+     * @param {*} defaultValue - Default value if key not found
+     * @returns {*} Configuration value
+     */
+    getConfig(key, defaultValue = undefined) {
+      return this.config[key] !== undefined ? this.config[key] : defaultValue;
+    }
+
+    /**
+     * Set configuration value
+     * @param {string} key - Configuration key
+     * @param {*} value - Configuration value
+     */
+    setConfig(key, value) {
+      this.config[key] = value;
+    }
+
+    /**
+     * Dispatch a custom event
+     * @param {string} eventName - Event name
+     * @param {Object} detail - Event detail object
+     * @param {boolean} bubbles - Whether event bubbles (default: true)
+     * @param {boolean} composed - Whether event crosses shadow DOM boundary (default: true)
+     */
+    dispatchCustomEvent(eventName, detail = {}, bubbles = true, composed = true) {
+      this.dispatchEvent(new CustomEvent(eventName, {
+        detail,
+        bubbles,
+        composed
+      }));
+    }
+
+    /**
+     * Get the root element (shadow root or this)
+     * @returns {ShadowRoot|HTMLElement} Root element
+     */
+    getRoot() {
+      return this.shadowRoot || this;
+    }
+
+    /**
+     * Query selector in root
+     * @param {string} selector - CSS selector
+     * @returns {HTMLElement|null} Element or null
+     */
+    queryRoot(selector) {
+      const root = this.getRoot();
+      return root.querySelector ? root.querySelector(selector) : null;
+    }
+
+    /**
+     * Query selector all in root
+     * @param {string} selector - CSS selector
+     * @returns {NodeList} Elements
+     */
+    queryRootAll(selector) {
+      const root = this.getRoot();
+      return root.querySelectorAll ? root.querySelectorAll(selector) : [];
+    }
+  }
+
+  /**
+   * StreamDisplayBase - Abstract base class for stream display components
+   * 
+   * This base class extends UIComponentBase and implements StreamDisplayInterface.
+   * It provides common functionality for components that display audio/video streams.
+   * 
+   * Subclasses should implement:
+   * - setStreams(user, streams)
+   * - removeStreams(user)
+   * 
+   * @abstract
+   * @extends UIComponentBase
+   * @implements StreamDisplayInterface
+   */
+
+
+  class StreamDisplayBase extends UIComponentBase {
+    /**
+     * Create a new StreamDisplayBase instance
+     * @param {HTMLElement} container - Container element (optional, can be set later)
+     * @param {Object} config - Configuration options
+     */
+    constructor(container = null, config = {}) {
+      super(config);
+      
+      this.container = container;
+      this.activeStreams = {}; // Track streams by user name
+      
+      // If container is provided and we're not a custom element, attach to it
+      if (container && !this.isConnected) ;
+    }
+
+    /**
+     * Set streams for a user
+     * Must be implemented by subclasses
+     * @param {string} user - User name
+     * @param {Object} streams - {localStream: MediaStream, remoteStream: MediaStream}
+     * @abstract
+     */
+    setStreams(user, streams) {
+      throw new Error('setStreams must be implemented by subclass');
+    }
+
+    /**
+     * Remove streams for a user
+     * Must be implemented by subclasses
+     * @param {string} user - User name
+     * @abstract
+     */
+    removeStreams(user) {
+      throw new Error('removeStreams must be implemented by subclass');
+    }
+
+    /**
+     * Show the stream display
+     * Default implementation - can be overridden
+     */
+    show() {
+      if (this.container) {
+        this.container.style.display = 'block';
+      } else if (this.shadowRoot) {
+        const root = this.getRoot();
+        if (root.style) {
+          root.style.display = 'block';
+        }
+      }
+    }
+
+    /**
+     * Hide the stream display
+     * Default implementation - can be overridden
+     */
+    hide() {
+      if (this.container) {
+        this.container.style.display = 'none';
+      } else if (this.shadowRoot) {
+        const root = this.getRoot();
+        if (root.style) {
+          root.style.display = 'none';
+        }
+      }
+    }
+
+    /**
+     * Check if there are active streams
+     * @returns {boolean} True if there are active streams
+     */
+    hasActiveStreams() {
+      return Object.keys(this.activeStreams).length > 0;
+    }
+
+    /**
+     * Get list of active user names
+     * @returns {string[]} Array of user names with active streams
+     */
+    getActiveUsers() {
+      return Object.keys(this.activeStreams);
+    }
+
+    /**
+     * Remove all streams
+     */
+    removeAllStreams() {
+      const users = Object.keys(this.activeStreams);
+      users.forEach(user => this.removeStreams(user));
+    }
+
+    /**
+     * Setup track end handlers for a stream
+     * @param {string} user - User name
+     * @param {MediaStream} localStream - Local stream
+     * @param {MediaStream} remoteStream - Remote stream
+     * @protected
+     */
+    _setupTrackEndHandlers(user, localStream, remoteStream) {
+      const streamData = this.activeStreams[user];
+      if (!streamData) return;
+
+      // Remove existing handlers
+      if (streamData.trackEndHandlers) {
+        streamData.trackEndHandlers.forEach(handler => {
+          if (handler.track && handler.track.onended) {
+            handler.track.onended = null;
+          }
+        });
+      }
+      streamData.trackEndHandlers = [];
+
+      // Setup new handlers
+      const handleTrackEnd = () => {
+        console.log(`Stream track ended for ${user}`);
+        this.removeStreams(user);
+      };
+
+      if (remoteStream && remoteStream instanceof MediaStream && typeof remoteStream.getTracks === 'function') {
+        remoteStream.getTracks().forEach(track => {
+          track.onended = handleTrackEnd;
+          streamData.trackEndHandlers.push({ track, type: 'remote' });
+        });
+      }
+      if (localStream && localStream instanceof MediaStream && typeof localStream.getTracks === 'function') {
+        localStream.getTracks().forEach(track => {
+          track.onended = handleTrackEnd;
+          streamData.trackEndHandlers.push({ track, type: 'local' });
+        });
+      }
+    }
+
+    /**
+     * Stop all tracks in a stream
+     * @param {MediaStream} stream - Media stream
+     * @protected
+     */
+    _stopStreamTracks(stream) {
+      if (stream && stream instanceof MediaStream && typeof stream.getTracks === 'function') {
+        stream.getTracks().forEach(track => {
+          track.stop();
+        });
+      }
+    }
+  }
+
+  /**
+   * ActiveUsersListBase - Abstract base class for active users list components
+   * 
+   * This abstract class defines the contract for displaying and managing
+   * active users in a chat interface. It is implementation-agnostic and can
+   * be implemented using HTMLElement, React, Vue, or any other framework.
+   * 
+   * @abstract
+   */
+  class ActiveUsersListBase {
+    /**
+     * Create a new ActiveUsersListBase instance
+     * @param {Object} config - Configuration options
+     * @param {Array<string>} config.userColors - Array of colors for users
+     */
+    constructor(config = {}) {
+      if (new.target === ActiveUsersListBase) {
+        throw new Error('ActiveUsersListBase is abstract and cannot be instantiated directly');
+      }
+      
+      this.config = {
+        userColors: config.userColors || ['lightcoral', 'lightseagreen', 'lightsalmon', 'lightgreen'],
+        ...config
+      };
+      
+      this.userColorMap = new Map(); // Map<user, color>
+    }
+
+    /**
+     * Update the list of active users
+     * Must be implemented by subclasses
+     * @param {Array<string>} users - List of active user names
+     * @param {Function} getUserColor - Optional function to get color for a user
+     * @abstract
+     */
+    updateUsers(users, getUserColor = null) {
+      throw new Error('updateUsers must be implemented by subclass');
+    }
+
+    /**
+     * Get color for a user (for consistency)
+     * Default implementation - can be overridden
+     * @param {string} user - User name
+     * @returns {string} Color
+     */
+    getUserColor(user) {
+      if (!this.userColorMap.has(user)) {
+        const index = this.userColorMap.size;
+        const userColors = this.config.userColors || [];
+        const color = userColors[index % userColors.length];
+        this.userColorMap.set(user, color);
+      }
+      return this.userColorMap.get(user);
+    }
+
+    /**
+     * Set user color explicitly
+     * @param {string} user - User name
+     * @param {string} color - Color
+     */
+    setUserColor(user, color) {
+      this.userColorMap.set(user, color);
+    }
+
+    /**
+     * Clear the user list
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    clear() {
+      throw new Error('clear must be implemented by subclass');
+    }
+
+    /**
+     * Notify that a user was clicked
+     * Subclasses should call this when a user is clicked
+     * @param {string} user - User name
+     * @protected
+     */
+    _onUserClick(user) {
+      // Default implementation - subclasses can override to dispatch events
+      if (this.onUserClick) {
+        this.onUserClick(user);
+      }
+    }
+  }
+
+  /**
+   * MessagesComponentBase - Abstract base class for messages display components
+   * 
+   * This abstract class defines the contract for displaying and managing
+   * chat messages. It is implementation-agnostic and can be implemented
+   * using HTMLElement, React, Vue, or any other framework.
+   * 
+   * @abstract
+   */
+  class MessagesComponentBase {
+    /**
+     * Create a new MessagesComponentBase instance
+     * @param {Object} config - Configuration options
+     * @param {string} config.primaryUserColor - Color for primary user messages
+     * @param {Array<string>} config.userColors - Array of colors for other users
+     */
+    constructor(config = {}) {
+      if (new.target === MessagesComponentBase) {
+        throw new Error('MessagesComponentBase is abstract and cannot be instantiated directly');
+      }
+      
+      this.config = {
+        primaryUserColor: config.primaryUserColor || 'lightblue',
+        userColors: config.userColors || ['lightcoral', 'lightseagreen', 'lightsalmon', 'lightgreen'],
+        ...config
+      };
+      
+      this.userColorMap = new Map(); // Map<user, color>
+    }
+
+    /**
+     * Append a message to the display
+     * Must be implemented by subclasses
+     * @param {Object} messageData - Message data
+     * @param {string|HTMLElement} messageData.data - Message content (string or custom element)
+     * @param {string} messageData.sender - Sender name
+     * @param {number} messageData.timestamp - Timestamp
+     * @param {boolean} messageData.isOwn - Whether this is the current user's message
+     * @abstract
+     */
+    appendMessage(messageData) {
+      throw new Error('appendMessage must be implemented by subclass');
+    }
+
+    /**
+     * Display a message (alias for appendMessage)
+     * Default implementation - can be overridden
+     * @param {Object} messageData - Message data
+     */
+    displayMessage(messageData) {
+      this.appendMessage(messageData);
+    }
+
+    /**
+     * Get color for a user (for consistency)
+     * Default implementation - can be overridden
+     * @param {string} user - User name
+     * @returns {string} Color
+     */
+    getUserColor(user) {
+      if (!user) return this.config.userColors[0];
+      
+      if (!this.userColorMap.has(user)) {
+        const index = this.userColorMap.size;
+        const userColors = this.config.userColors || [];
+        const color = userColors[index % userColors.length];
+        this.userColorMap.set(user, color);
+      }
+      return this.userColorMap.get(user);
+    }
+
+    /**
+     * Set user color explicitly
+     * @param {string} user - User name
+     * @param {string} color - Color
+     */
+    setUserColor(user, color) {
+      this.userColorMap.set(user, color);
+    }
+
+    /**
+     * Clear all messages
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    clear() {
+      throw new Error('clear must be implemented by subclass');
+    }
+
+    /**
+     * Load message history
+     * Default implementation - can be overridden
+     * @param {Array<Object>} history - Array of message objects
+     */
+    loadHistory(history) {
+      if (!Array.isArray(history)) return;
+      
+      history.forEach((entry) => {
+        this.appendMessage(entry);
+      });
+    }
+
+    /**
+     * Set the current user's name (for determining own messages)
+     * @param {string} name - Current user's name
+     */
+    setCurrentUserName(name) {
+      this.currentUserName = name;
+    }
+
+    /**
+     * Scroll to bottom of messages
+     * Must be implemented by subclasses if scrolling is needed
+     * @abstract
+     */
+    scrollToBottom() {
+      // Optional - no-op by default
+    }
+  }
+
+  /**
+   * MessageInputBase - Abstract base class for message input components
+   * 
+   * This abstract class defines the contract for message input and controls.
+   * It is implementation-agnostic and can be implemented using HTMLElement,
+   * React, Vue, or any other framework.
+   * 
+   * @abstract
+   */
+  class MessageInputBase {
+    /**
+     * Create a new MessageInputBase instance
+     * @param {Object} config - Configuration options
+     * @param {string} config.callModes - Call modes ('audio' | 'video' | 'both')
+     */
+    constructor(config = {}) {
+      if (new.target === MessageInputBase) {
+        throw new Error('MessageInputBase is abstract and cannot be instantiated directly');
+      }
+      
+      this.config = {
+        callModes: config.callModes || 'both',
+        ...config
+      };
+    }
+
+    /**
+     * Get the message input value
+     * Must be implemented by subclasses
+     * @returns {string} Current input value
+     * @abstract
+     */
+    getValue() {
+      throw new Error('getValue must be implemented by subclass');
+    }
+
+    /**
+     * Clear the message input
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    clear() {
+      throw new Error('clear must be implemented by subclass');
+    }
+
+    /**
+     * Enable or disable the input
+     * Must be implemented by subclasses
+     * @param {boolean} enabled - Whether input should be enabled
+     * @abstract
+     */
+    setEnabled(enabled) {
+      throw new Error('setEnabled must be implemented by subclass');
+    }
+
+    /**
+     * Notify that a message should be sent
+     * Subclasses should call this when user wants to send a message
+     * @param {string} message - Message text
+     * @protected
+     */
+    _onSend(message) {
+      if (this.onSend) {
+        this.onSend(message);
+      }
+    }
+
+    /**
+     * Notify that emoji button was clicked
+     * Subclasses should call this when emoji button is clicked
+     * @protected
+     */
+    _onEmojiClick() {
+      if (this.onEmojiClick) {
+        this.onEmojiClick();
+      }
+    }
+
+    /**
+     * Notify that clear button was clicked
+     * Subclasses should call this when clear button is clicked
+     * @protected
+     */
+    _onClearClick() {
+      if (this.onClearClick) {
+        this.onClearClick();
+      }
+    }
+  }
+
+  /**
+   * ChatHeaderBase - Abstract base class for chat header components
+   * 
+   * This abstract class defines the contract for chat header functionality
+   * including room and name management. It is implementation-agnostic and
+   * can be implemented using HTMLElement, React, Vue, or any other framework.
+   * 
+   * @abstract
+   */
+  class ChatHeaderBase {
+    /**
+     * Create a new ChatHeaderBase instance
+     * @param {Object} config - Configuration options
+     * @param {boolean} config.allowRoomChange - Whether room changes are allowed
+     * @param {boolean} config.showRoom - Whether to show room name
+     * @param {string} config.baseTopic - Base MQTT topic prefix
+     * @param {string} config.currentRoom - Current room name
+     * @param {string} config.primaryUserColor - Primary user color
+     */
+    constructor(config = {}) {
+      if (new.target === ChatHeaderBase) {
+        throw new Error('ChatHeaderBase is abstract and cannot be instantiated directly');
+      }
+      
+      this.config = {
+        allowRoomChange: config.allowRoomChange !== false,
+        showRoom: config.showRoom !== false,
+        baseTopic: config.baseTopic || '',
+        currentRoom: config.currentRoom || '',
+        primaryUserColor: config.primaryUserColor || 'lightblue',
+        ...config
+      };
+    }
+
+    /**
+     * Set the room name
+     * Must be implemented by subclasses
+     * @param {string} room - Room name
+     * @abstract
+     */
+    setRoom(room) {
+      throw new Error('setRoom must be implemented by subclass');
+    }
+
+    /**
+     * Set the user name
+     * Must be implemented by subclasses
+     * @param {string} name - User name
+     * @abstract
+     */
+    setName(name) {
+      throw new Error('setName must be implemented by subclass');
+    }
+
+    /**
+     * Set the room prefix (base topic)
+     * Must be implemented by subclasses
+     * @param {string} prefix - Room prefix
+     * @abstract
+     */
+    setRoomPrefix(prefix) {
+      throw new Error('setRoomPrefix must be implemented by subclass');
+    }
+
+    /**
+     * Set whether the header is collapsible
+     * Optional - no-op by default
+     * @param {boolean} collapsible - Whether header should be collapsible
+     */
+    setCollapsible(collapsible) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Notify that room name changed
+     * Subclasses should call this when room name changes
+     * @param {string} room - New room name
+     * @protected
+     */
+    _onRoomChange(room) {
+      if (this.onRoomChange) {
+        this.onRoomChange(room);
+      }
+    }
+
+    /**
+     * Notify that user name changed
+     * Subclasses should call this when user name changes
+     * @param {string} name - New user name
+     * @protected
+     */
+    _onNameChange(name) {
+      if (this.onNameChange) {
+        this.onNameChange(name);
+      }
+    }
+  }
+
+  /**
+   * CallManagementBase - Abstract base class for call management UI components
+   * 
+   * This abstract class defines the contract for displaying call controls,
+   * call information, and handling call-related UI interactions. It is
+   * implementation-agnostic and can be implemented using HTMLElement, React,
+   * Vue, or any other framework.
+   * 
+   * @abstract
+   */
+  class CallManagementBase {
+    /**
+     * Create a new CallManagementBase instance
+     * @param {CallManager} callManager - CallManager instance to read state from
+     * @param {Object} options - Configuration options
+     * @param {boolean} options.showMetrics - Whether to show call metrics
+     */
+    constructor(callManager, options = {}) {
+      if (new.target === CallManagementBase) {
+        throw new Error('CallManagementBase is abstract and cannot be instantiated directly');
+      }
+      
+      if (!callManager) {
+        throw new Error('CallManager is required');
+      }
+      
+      this.callManager = callManager;
+      this.options = {
+        showMetrics: options.showMetrics !== false, // Default: true
+        ...options
+      };
+    }
+
+    /**
+     * Show an incoming call prompt
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the caller
+     * @param {Object} callInfo - {video: boolean, audio: boolean}
+     * @returns {Promise<boolean>} Promise that resolves to true to accept, false to reject
+     * @abstract
+     */
+    showIncomingCallPrompt(peerName, callInfo) {
+      throw new Error('showIncomingCallPrompt must be implemented by subclass');
+    }
+
+    /**
+     * Hide/remove an incoming call prompt
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the caller
+     * @abstract
+     */
+    hideIncomingCallPrompt(peerName) {
+      throw new Error('hideIncomingCallPrompt must be implemented by subclass');
+    }
+
+    /**
+     * Show a missed call notification
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @param {string} direction - 'incoming' or 'outgoing'
+     * @abstract
+     */
+    showMissedCallNotification(peerName, direction) {
+      throw new Error('showMissedCallNotification must be implemented by subclass');
+    }
+
+    /**
+     * Show a call declined notification
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer who declined
+     * @abstract
+     */
+    showCallDeclinedNotification(peerName) {
+      throw new Error('showCallDeclinedNotification must be implemented by subclass');
+    }
+
+    /**
+     * Update call info display (list of active calls)
+     * Must be implemented by subclasses
+     * @param {Set|Array} audioCalls - Set or array of users in audio calls
+     * @param {Set|Array} videoCalls - Set or array of users in video calls
+     * @abstract
+     */
+    setActiveCalls(audioCalls, videoCalls) {
+      throw new Error('setActiveCalls must be implemented by subclass');
+    }
+
+    /**
+     * Update mute state display
+     * Must be implemented by subclasses
+     * @param {Object} state - Mute state object {mic: boolean, speakers: boolean, video: boolean}
+     * @abstract
+     */
+    setMuteState(state) {
+      throw new Error('setMuteState must be implemented by subclass');
+    }
+
+    /**
+     * Set latency metrics for a user
+     * Must be implemented by subclasses
+     * @param {string} user - User name
+     * @param {Object} metrics - Metrics object {rtt: number, packetLoss: number, jitter: number}
+     * @abstract
+     */
+    setMetrics(user, metrics) {
+      throw new Error('setMetrics must be implemented by subclass');
+    }
+
+    /**
+     * Clear metrics for a user
+     * Optional - no-op by default
+     * @param {string} user - User name
+     */
+    clearMetrics(user) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Clear all metrics
+     * Optional - no-op by default
+     */
+    clearAllMetrics() {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Update UI from CallManager state
+     * Default implementation - can be overridden
+     * @protected
+     */
+    _updateFromCallManager() {
+      const activeCalls = this.callManager.getActiveCalls();
+      const pendingCalls = this.callManager.getPendingCalls();
+      const hasActiveCalls = activeCalls.audio.size > 0 || activeCalls.video.size > 0;
+      const hasPendingCalls = pendingCalls.size > 0;
+      
+      if (!hasActiveCalls && !hasPendingCalls) {
+        this._setStateInactive();
+      } else if (hasPendingCalls && !hasActiveCalls) {
+        this._setStatePending();
+      } else if (hasActiveCalls) {
+        this._setStateActive(activeCalls.audio, activeCalls.video);
+      }
+    }
+
+    /**
+     * Set UI to inactive state (no calls)
+     * Must be implemented by subclasses
+     * @protected
+     * @abstract
+     */
+    _setStateInactive() {
+      throw new Error('_setStateInactive must be implemented by subclass');
+    }
+
+    /**
+     * Set UI to pending state (incoming call)
+     * Must be implemented by subclasses
+     * @protected
+     * @abstract
+     */
+    _setStatePending() {
+      throw new Error('_setStatePending must be implemented by subclass');
+    }
+
+    /**
+     * Set UI to active state (active call)
+     * Must be implemented by subclasses
+     * @param {Set|Array} audioCalls - Audio calls
+     * @param {Set|Array} videoCalls - Video calls
+     * @protected
+     * @abstract
+     */
+    _setStateActive(audioCalls, videoCalls) {
+      throw new Error('_setStateActive must be implemented by subclass');
+    }
+  }
+
+  /**
+   * VideoChatBase - Abstract base class for video chat components
+   * 
+   * This abstract class defines the contract for video chat functionality
+   * including local/remote video stream management and call controls.
+   * It is implementation-agnostic and can be implemented using HTMLElement,
+   * React, Vue, or any other framework.
+   * 
+   * @abstract
+   */
+  class VideoChatBase {
+    /**
+     * Create a new VideoChatBase instance
+     * @param {Object} rtc - RTC client instance
+     * @param {Object} options - Configuration options
+     * @param {Object} options.window - Window object (for resize handling)
+     * @param {boolean} options.assignToWindow - Whether to assign to window.vc
+     */
+    constructor(rtc, options = {}) {
+      if (new.target === VideoChatBase) {
+        throw new Error('VideoChatBase is abstract and cannot be instantiated directly');
+      }
+      
+      this.rtc = rtc;
+      this.options = {
+        window: options.window || (typeof window !== 'undefined' ? window : null),
+        assignToWindow: options.assignToWindow !== false,
+        ...options
+      };
+    }
+
+    /**
+     * Set the local video source (MediaStream)
+     * Must be implemented by subclasses
+     * @param {MediaStream|null} src - MediaStream to display, or null to clear
+     * @abstract
+     */
+    setLocalSrc(src) {
+      throw new Error('setLocalSrc must be implemented by subclass');
+    }
+
+    /**
+     * Set the remote video source (MediaStream)
+     * Must be implemented by subclasses
+     * @param {MediaStream|null} src - MediaStream to display, or null to clear
+     * @abstract
+     */
+    setRemoteSrc(src) {
+      throw new Error('setRemoteSrc must be implemented by subclass');
+    }
+
+    /**
+     * Show the video chat UI
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    show() {
+      throw new Error('show must be implemented by subclass');
+    }
+
+    /**
+     * Hide the video chat UI
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    hide() {
+      throw new Error('hide must be implemented by subclass');
+    }
+
+    /**
+     * Start a call with a peer
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer to call
+     * @returns {Promise} Promise that resolves when call is started
+     * @abstract
+     */
+    call(peerName) {
+      throw new Error('call must be implemented by subclass');
+    }
+
+    /**
+     * End a call with a peer
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @abstract
+     */
+    endCall(peerName) {
+      throw new Error('endCall must be implemented by subclass');
+    }
+
+    /**
+     * Handle window resize
+     * Optional - no-op by default
+     * @param {Object} window - Window object
+     */
+    resize(window) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Cleanup and destroy the component
+     * Optional - no-op by default
+     */
+    destroy() {
+      // Optional - no-op by default
+    }
+  }
+
+  /**
+   * VideoStreamDisplayBase - Abstract base class for video stream display components
+   * 
+   * This abstract class defines the contract for displaying video streams from
+   * multiple peers. It is implementation-agnostic and can be implemented using
+   * HTMLElement, React, Vue, or any other framework.
+   * 
+   * Implements StreamDisplayInterface contract.
+   * 
+   * @abstract
+   * @implements StreamDisplayInterface
+   */
+
+
+  class VideoStreamDisplayBase {
+    /**
+     * Create a new VideoStreamDisplayBase instance
+     * @param {HTMLElement|Object} container - Container element or container object
+     * @param {Object} options - Configuration options
+     * @param {string} options.localVideoSize - Size of local video overlay (default: '30%')
+     * @param {string} options.localVideoPosition - Position of local video (default: 'top-right')
+     * @param {class} options.VideoClass - Video class implementing VideoInterface (optional)
+     */
+    constructor(container, options = {}) {
+      if (new.target === VideoStreamDisplayBase) {
+        throw new Error('VideoStreamDisplayBase is abstract and cannot be instantiated directly');
+      }
+      
+      if (!container) {
+        throw new Error('VideoStreamDisplayBase requires a container');
+      }
+      
+      this.container = container;
+      this.options = {
+        localVideoSize: options.localVideoSize || '30%',
+        localVideoPosition: options.localVideoPosition || 'top-right',
+        VideoClass: options.VideoClass,
+        ...options
+      };
+      
+      this.activeStreams = {}; // Track streams by peer name
+    }
+
+    /**
+     * Set video streams for a peer
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @param {Object} streams - Stream objects
+     * @param {MediaStream} streams.localStream - Local media stream
+     * @param {MediaStream} streams.remoteStream - Remote media stream
+     * @abstract
+     */
+    setStreams(peerName, { localStream, remoteStream }) {
+      throw new Error('setStreams must be implemented by subclass');
+    }
+
+    /**
+     * Remove video streams for a peer
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @abstract
+     */
+    removeStreams(peerName) {
+      throw new Error('removeStreams must be implemented by subclass');
+    }
+
+    /**
+     * Show the video container
+     * Default implementation - can be overridden
+     */
+    show() {
+      if (this.container && this.container.style) {
+        if (this.hasActiveStreams()) {
+          this.container.style.display = 'block';
+        }
+      }
+    }
+
+    /**
+     * Hide the video container
+     * Default implementation - can be overridden
+     */
+    hide() {
+      if (this.container && this.container.style) {
+        this.container.style.display = 'none';
+      }
+    }
+
+    /**
+     * Check if there are active streams
+     * @returns {boolean} True if there are active streams
+     */
+    hasActiveStreams() {
+      return Object.keys(this.activeStreams).length > 0;
+    }
+
+    /**
+     * Get list of active peer names
+     * @returns {string[]} Array of peer names with active streams
+     */
+    getActivePeers() {
+      return Object.keys(this.activeStreams);
+    }
+
+    /**
+     * Remove all video streams
+     * Default implementation - can be overridden
+     */
+    removeAllStreams() {
+      const peerNames = Object.keys(this.activeStreams);
+      peerNames.forEach(peerName => this.removeStreams(peerName));
+    }
+
+    /**
+     * Setup track end handlers for a stream
+     * Default implementation - can be overridden
+     * @param {string} peerName - Name of the peer
+     * @param {MediaStream} localStream - Local stream
+     * @param {MediaStream} remoteStream - Remote stream
+     * @protected
+     */
+    _setupTrackEndHandlers(peerName, localStream, remoteStream) {
+      const streamData = this.activeStreams[peerName];
+      if (!streamData) return;
+
+      // Remove existing handlers
+      if (streamData.trackEndHandlers) {
+        streamData.trackEndHandlers.forEach(handler => {
+          if (handler.track && handler.track.onended) {
+            handler.track.onended = null;
+          }
+        });
+      }
+      streamData.trackEndHandlers = [];
+
+      // Setup new handlers
+      const handleTrackEnd = () => {
+        console.log(`Stream track ended for ${peerName}`);
+        this.removeStreams(peerName);
+      };
+
+      if (remoteStream && remoteStream instanceof MediaStream && typeof remoteStream.getTracks === 'function') {
+        remoteStream.getTracks().forEach(track => {
+          track.onended = handleTrackEnd;
+          streamData.trackEndHandlers.push({ track, type: 'remote' });
+        });
+      }
+      if (localStream && localStream instanceof MediaStream && typeof localStream.getTracks === 'function') {
+        localStream.getTracks().forEach(track => {
+          track.onended = handleTrackEnd;
+          streamData.trackEndHandlers.push({ track, type: 'local' });
+        });
+      }
+    }
+
+    /**
+     * Stop all tracks in a stream
+     * @param {MediaStream} stream - Media stream
+     * @protected
+     */
+    _stopStreamTracks(stream) {
+      if (stream && stream instanceof MediaStream && typeof stream.getTracks === 'function') {
+        stream.getTracks().forEach(track => {
+          track.stop();
+        });
+      }
+    }
+
+    /**
+     * Setup CSS styles for video elements
+     * Must be implemented by subclasses if styles are needed
+     * @protected
+     * @abstract
+     */
+    _setupStyles() {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Create a video container element for a peer
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @returns {Object} Object with container and video elements
+     * @protected
+     * @abstract
+     */
+    _createVideoContainer(peerName) {
+      throw new Error('_createVideoContainer must be implemented by subclass');
+    }
+  }
+
+  /**
+   * ActiveUsersListHTMLElementBase - HTMLElement-based base for active users list
+   * 
+   * This class extends UIComponentBase (which extends HTMLElement) and implements
+   * the ActiveUsersListBase contract. This allows concrete implementations to
+   * extend this class and get both HTMLElement functionality and the abstract contract.
+   * 
+   * @extends UIComponentBase
+   * @implements ActiveUsersListBase
+   */
+
+
+  class ActiveUsersListHTMLElementBase extends UIComponentBase {
+    /**
+     * Create a new ActiveUsersListHTMLElementBase instance
+     * @param {Object} config - Configuration options
+     */
+    constructor(config = {}) {
+      super(config);
+      
+      // Initialize abstract base functionality
+      // Initialize properties from ActiveUsersListBase
+      this.userColorMap = new Map(); // Map<user, color>
+    }
+
+    /**
+     * Update the list of active users
+     * Must be implemented by subclasses
+     * @param {Array<string>} users - List of active user names
+     * @param {Function} getUserColor - Optional function to get color for a user
+     * @abstract
+     */
+    updateUsers(users, getUserColor = null) {
+      throw new Error('updateUsers must be implemented by subclass');
+    }
+
+    /**
+     * Get color for a user (for consistency)
+     * Default implementation from ActiveUsersListBase
+     * @param {string} user - User name
+     * @returns {string} Color
+     */
+    getUserColor(user) {
+      if (!this.userColorMap) {
+        this.userColorMap = new Map();
+      }
+      if (!this.userColorMap.has(user)) {
+        const index = this.userColorMap.size;
+        const userColors = this.getConfig('userColors') || [];
+        const color = userColors[index % userColors.length];
+        this.userColorMap.set(user, color);
+      }
+      return this.userColorMap.get(user);
+    }
+
+    /**
+     * Set user color explicitly
+     * @param {string} user - User name
+     * @param {string} color - Color
+     */
+    setUserColor(user, color) {
+      if (!this.userColorMap) {
+        this.userColorMap = new Map();
+      }
+      this.userColorMap.set(user, color);
+    }
+
+    /**
+     * Clear the user list
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    clear() {
+      throw new Error('clear must be implemented by subclass');
+    }
+
+    /**
+     * Notify that a user was clicked
+     * Default implementation dispatches custom event
+     * @param {string} user - User name
+     * @protected
+     */
+    _onUserClick(user) {
+      this.dispatchCustomEvent('userclick', { user });
+    }
+  }
+
+  /**
+   * MessagesComponentHTMLElementBase - HTMLElement-based base for messages component
+   * 
+   * This class extends UIComponentBase (which extends HTMLElement) and implements
+   * the MessagesComponentBase contract. This allows concrete implementations to
+   * extend this class and get both HTMLElement functionality and the abstract contract.
+   * 
+   * @extends UIComponentBase
+   * @implements MessagesComponentBase
+   */
+
+
+  class MessagesComponentHTMLElementBase extends UIComponentBase {
+    /**
+     * Create a new MessagesComponentHTMLElementBase instance
+     * @param {Object} config - Configuration options
+     */
+    constructor(config = {}) {
+      super(config);
+      
+      // Initialize abstract base functionality
+      // Initialize properties from MessagesComponentBase
+      this.userColorMap = new Map(); // Map<user, color>
+    }
+
+    /**
+     * Append a message to the display
+     * Must be implemented by subclasses
+     * @param {Object} messageData - Message data
+     * @abstract
+     */
+    appendMessage(messageData) {
+      throw new Error('appendMessage must be implemented by subclass');
+    }
+
+    /**
+     * Display a message (alias for appendMessage)
+     * Default implementation from MessagesComponentBase
+     * @param {Object} messageData - Message data
+     */
+    displayMessage(messageData) {
+      this.appendMessage(messageData);
+    }
+
+    /**
+     * Get color for a user (for consistency)
+     * Default implementation from MessagesComponentBase
+     * @param {string} user - User name
+     * @returns {string} Color
+     */
+    getUserColor(user) {
+      if (!this.userColorMap) {
+        this.userColorMap = new Map();
+      }
+      if (!user) return this.getConfig('userColors')[0];
+      
+      if (!this.userColorMap.has(user)) {
+        const index = this.userColorMap.size;
+        const userColors = this.getConfig('userColors') || [];
+        const color = userColors[index % userColors.length];
+        this.userColorMap.set(user, color);
+      }
+      return this.userColorMap.get(user);
+    }
+
+    /**
+     * Set user color explicitly
+     * @param {string} user - User name
+     * @param {string} color - Color
+     */
+    setUserColor(user, color) {
+      if (!this.userColorMap) {
+        this.userColorMap = new Map();
+      }
+      this.userColorMap.set(user, color);
+    }
+
+    /**
+     * Clear all messages
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    clear() {
+      throw new Error('clear must be implemented by subclass');
+    }
+
+    /**
+     * Load message history
+     * Default implementation from MessagesComponentBase
+     * @param {Array<Object>} history - Array of message objects
+     */
+    loadHistory(history) {
+      if (!Array.isArray(history)) return;
+      
+      history.forEach((entry) => {
+        this.appendMessage(entry);
+      });
+    }
+
+    /**
+     * Set the current user's name (for determining own messages)
+     * @param {string} name - Current user's name
+     */
+    setCurrentUserName(name) {
+      this.currentUserName = name;
+    }
+
+    /**
+     * Scroll to bottom of messages
+     * Default implementation - can be overridden
+     */
+    scrollToBottom() {
+      // Optional - no-op by default, subclasses should implement
+    }
+  }
+
+  /**
+   * MessageInputHTMLElementBase - HTMLElement-based base for message input component
+   * 
+   * This class extends UIComponentBase (which extends HTMLElement) and implements
+   * the MessageInputBase contract. This allows concrete implementations to
+   * extend this class and get both HTMLElement functionality and the abstract contract.
+   * 
+   * @extends UIComponentBase
+   * @implements MessageInputBase
+   */
+
+
+  class MessageInputHTMLElementBase extends UIComponentBase {
+    /**
+     * Create a new MessageInputHTMLElementBase instance
+     * @param {Object} config - Configuration options
+     */
+    constructor(config = {}) {
+      super(config);
+      
+      // Initialize abstract base functionality
+      // MessageInputBase doesn't require additional initialization
+    }
+
+    /**
+     * Get the message input value
+     * Must be implemented by subclasses
+     * @returns {string} Current input value
+     * @abstract
+     */
+    getValue() {
+      throw new Error('getValue must be implemented by subclass');
+    }
+
+    /**
+     * Clear the message input
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    clear() {
+      throw new Error('clear must be implemented by subclass');
+    }
+
+    /**
+     * Enable or disable the input
+     * Must be implemented by subclasses
+     * @param {boolean} enabled - Whether input should be enabled
+     * @abstract
+     */
+    setEnabled(enabled) {
+      throw new Error('setEnabled must be implemented by subclass');
+    }
+
+    /**
+     * Notify that a message should be sent
+     * Default implementation dispatches custom event
+     * @param {string} message - Message text
+     * @protected
+     */
+    _onSend(message) {
+      this.dispatchCustomEvent('sendmessage', { message });
+    }
+
+    /**
+     * Notify that emoji button was clicked
+     * Default implementation dispatches custom event
+     * @protected
+     */
+    _onEmojiClick() {
+      this.dispatchCustomEvent('emojiclick');
+    }
+
+    /**
+     * Notify that clear button was clicked
+     * Default implementation dispatches custom event
+     * @protected
+     */
+    _onClearClick() {
+      this.dispatchCustomEvent('clearclick');
+    }
+  }
+
+  /**
+   * ChatHeaderHTMLElementBase - HTMLElement-based base for chat header component
+   * 
+   * This class extends UIComponentBase (which extends HTMLElement) and implements
+   * the ChatHeaderBase contract. This allows concrete implementations to
+   * extend this class and get both HTMLElement functionality and the abstract contract.
+   * 
+   * @extends UIComponentBase
+   * @implements ChatHeaderBase
+   */
+
+
+  class ChatHeaderHTMLElementBase extends UIComponentBase {
+    /**
+     * Create a new ChatHeaderHTMLElementBase instance
+     * @param {Object} config - Configuration options
+     */
+    constructor(config = {}) {
+      super(config);
+      
+      // Initialize abstract base functionality
+      // ChatHeaderBase doesn't require additional initialization
+    }
+
+    /**
+     * Set the room name
+     * Must be implemented by subclasses
+     * @param {string} room - Room name
+     * @abstract
+     */
+    setRoom(room) {
+      throw new Error('setRoom must be implemented by subclass');
+    }
+
+    /**
+     * Set the user name
+     * Must be implemented by subclasses
+     * @param {string} name - User name
+     * @abstract
+     */
+    setName(name) {
+      throw new Error('setName must be implemented by subclass');
+    }
+
+    /**
+     * Set the room prefix (base topic)
+     * Must be implemented by subclasses
+     * @param {string} prefix - Room prefix
+     * @abstract
+     */
+    setRoomPrefix(prefix) {
+      throw new Error('setRoomPrefix must be implemented by subclass');
+    }
+
+    /**
+     * Set whether the header is collapsible
+     * Default implementation - can be overridden
+     * @param {boolean} collapsible - Whether header should be collapsible
+     */
+    setCollapsible(collapsible) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Notify that room name changed
+     * Default implementation dispatches custom event
+     * @param {string} room - New room name
+     * @protected
+     */
+    _onRoomChange(room) {
+      this.dispatchCustomEvent('roomchange', { room });
+    }
+
+    /**
+     * Notify that user name changed
+     * Default implementation dispatches custom event
+     * @param {string} name - New user name
+     * @protected
+     */
+    _onNameChange(name) {
+      this.dispatchCustomEvent('namechange', { name });
+    }
+  }
+
+  /**
+   * CallManagementHTMLElementBase - HTMLElement-based base for call management component
+   * 
+   * This class extends UIComponentBase (which extends HTMLElement) and implements
+   * the CallManagementBase contract. This allows concrete implementations to
+   * extend this class and get both HTMLElement functionality and the abstract contract.
+   * 
+   * Note: CallManagement is not a Web Component, so this base class is provided
+   * for consistency, but CallManagement may not extend it directly.
+   * 
+   * @extends UIComponentBase
+   * @implements CallManagementBase
+   */
+
+
+  class CallManagementHTMLElementBase extends UIComponentBase {
+    /**
+     * Create a new CallManagementHTMLElementBase instance
+     * @param {CallManager} callManager - CallManager instance to read state from
+     * @param {Object} options - Configuration options
+     */
+    constructor(callManager, options = {}) {
+      super(options);
+      
+      // Initialize abstract base functionality
+      // Initialize properties from CallManagementBase
+      if (!callManager) {
+        throw new Error('CallManager is required');
+      }
+      this.callManager = callManager;
+    }
+
+    /**
+     * Show an incoming call prompt
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the caller
+     * @param {Object} callInfo - {video: boolean, audio: boolean}
+     * @returns {Promise<boolean>} Promise that resolves to true to accept, false to reject
+     * @abstract
+     */
+    showIncomingCallPrompt(peerName, callInfo) {
+      throw new Error('showIncomingCallPrompt must be implemented by subclass');
+    }
+
+    /**
+     * Hide/remove an incoming call prompt
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the caller
+     * @abstract
+     */
+    hideIncomingCallPrompt(peerName) {
+      throw new Error('hideIncomingCallPrompt must be implemented by subclass');
+    }
+
+    /**
+     * Show a missed call notification
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @param {string} direction - 'incoming' or 'outgoing'
+     * @abstract
+     */
+    showMissedCallNotification(peerName, direction) {
+      throw new Error('showMissedCallNotification must be implemented by subclass');
+    }
+
+    /**
+     * Show a call declined notification
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer who declined
+     * @abstract
+     */
+    showCallDeclinedNotification(peerName) {
+      throw new Error('showCallDeclinedNotification must be implemented by subclass');
+    }
+
+    /**
+     * Update call info display (list of active calls)
+     * Must be implemented by subclasses
+     * @param {Set|Array} audioCalls - Set or array of users in audio calls
+     * @param {Set|Array} videoCalls - Set or array of users in video calls
+     * @abstract
+     */
+    setActiveCalls(audioCalls, videoCalls) {
+      throw new Error('setActiveCalls must be implemented by subclass');
+    }
+
+    /**
+     * Update mute state display
+     * Must be implemented by subclasses
+     * @param {Object} state - Mute state object {mic: boolean, speakers: boolean, video: boolean}
+     * @abstract
+     */
+    setMuteState(state) {
+      throw new Error('setMuteState must be implemented by subclass');
+    }
+
+    /**
+     * Set latency metrics for a user
+     * Must be implemented by subclasses
+     * @param {string} user - User name
+     * @param {Object} metrics - Metrics object {rtt: number, packetLoss: number, jitter: number}
+     * @abstract
+     */
+    setMetrics(user, metrics) {
+      throw new Error('setMetrics must be implemented by subclass');
+    }
+
+    /**
+     * Clear metrics for a user
+     * Optional - no-op by default
+     * @param {string} user - User name
+     */
+    clearMetrics(user) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Clear all metrics
+     * Optional - no-op by default
+     */
+    clearAllMetrics() {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Update UI from CallManager state
+     * Default implementation from CallManagementBase
+     * @protected
+     */
+    _updateFromCallManager() {
+      const activeCalls = this.callManager.getActiveCalls();
+      const pendingCalls = this.callManager.getPendingCalls();
+      const hasActiveCalls = activeCalls.audio.size > 0 || activeCalls.video.size > 0;
+      const hasPendingCalls = pendingCalls.size > 0;
+      
+      if (!hasActiveCalls && !hasPendingCalls) {
+        this._setStateInactive();
+      } else if (hasPendingCalls && !hasActiveCalls) {
+        this._setStatePending();
+      } else if (hasActiveCalls) {
+        this._setStateActive(activeCalls.audio, activeCalls.video);
+      }
+    }
+
+    /**
+     * Set UI to inactive state (no calls)
+     * Must be implemented by subclasses
+     * @protected
+     * @abstract
+     */
+    _setStateInactive() {
+      throw new Error('_setStateInactive must be implemented by subclass');
+    }
+
+    /**
+     * Set UI to pending state (incoming call)
+     * Must be implemented by subclasses
+     * @protected
+     * @abstract
+     */
+    _setStatePending() {
+      throw new Error('_setStatePending must be implemented by subclass');
+    }
+
+    /**
+     * Set UI to active state (active call)
+     * Must be implemented by subclasses
+     * @param {Set|Array} audioCalls - Audio calls
+     * @param {Set|Array} videoCalls - Video calls
+     * @protected
+     * @abstract
+     */
+    _setStateActive(audioCalls, videoCalls) {
+      throw new Error('_setStateActive must be implemented by subclass');
+    }
+  }
+
+  /**
+   * VideoChatHTMLElementBase - HTMLElement-based base for video chat component
+   * 
+   * This class extends UIComponentBase (which extends HTMLElement) and implements
+   * the VideoChatBase contract. This allows concrete implementations to
+   * extend this class and get both HTMLElement functionality and the abstract contract.
+   * 
+   * @extends UIComponentBase
+   * @implements VideoChatBase
+   */
+
+
+  class VideoChatHTMLElementBase extends UIComponentBase {
+    /**
+     * Create a new VideoChatHTMLElementBase instance
+     * @param {Object} rtc - RTC client instance
+     * @param {Object} options - Configuration options
+     */
+    constructor(rtc, options = {}) {
+      super(options);
+      
+      // Initialize abstract base functionality
+      // Initialize properties from VideoChatBase
+      this.rtc = rtc;
+      
+      // Store window reference
+      this._window = this.options.window;
+      this._assignToWindow = this.options.assignToWindow;
+      
+      // Note: RTCVideoChat initialization should be done in subclass
+      // after shadow DOM is set up, so callbacks can access DOM elements
+      // Subclasses should call _initializeRTCVideoChat() after setting up DOM
+    }
+    
+    /**
+     * Initialize RTCVideoChat with callbacks
+     * Should be called by subclasses after DOM is set up
+     * @protected
+     */
+    _initializeRTCVideoChat(rtc) {
+      // Bind methods
+      this.setLocalSrc = this.setLocalSrc.bind(this);
+      this.setRemoteSrc = this.setRemoteSrc.bind(this);
+      this.hide = this.hide.bind(this);
+      this.show = this.show.bind(this);
+      this.resize = this.resize.bind(this);
+      
+      // Initialize RTCVideoChat with callbacks
+      this.rtcVC = new RTCVideoChat(rtc,
+        this.setLocalSrc,
+        this.setRemoteSrc,
+        this.hide,
+        this.show
+      );
+      
+      // Optional window assignment
+      if (this._assignToWindow && this._window) {
+        this._window.vc = this;
+      }
+      
+      // Bind RTCVideoChat methods
+      this.call = this.rtcVC.call.bind(this.rtcVC);
+      this.endCall = this.rtcVC.endCall.bind(this.rtcVC);
+      
+      // Add resize listener if window is available
+      if (this._window) {
+        this._window.addEventListener('resize', this.resize);
+      }
+    }
+
+    /**
+     * Set the local video source (MediaStream)
+     * Must be implemented by subclasses
+     * @param {MediaStream|null} src - MediaStream to display, or null to clear
+     * @abstract
+     */
+    setLocalSrc(src) {
+      throw new Error('setLocalSrc must be implemented by subclass');
+    }
+
+    /**
+     * Set the remote video source (MediaStream)
+     * Must be implemented by subclasses
+     * @param {MediaStream|null} src - MediaStream to display, or null to clear
+     * @abstract
+     */
+    setRemoteSrc(src) {
+      throw new Error('setRemoteSrc must be implemented by subclass');
+    }
+
+    /**
+     * Show the video chat UI
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    show() {
+      throw new Error('show must be implemented by subclass');
+    }
+
+    /**
+     * Hide the video chat UI
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    hide() {
+      throw new Error('hide must be implemented by subclass');
+    }
+
+    /**
+     * Handle window resize
+     * Default implementation - can be overridden
+     * @param {Object} window - Window object (optional, uses this._window if not provided)
+     */
+    resize(window = null) {
+      const win = window || this._window;
+      if (!win) return;
+      
+      // Optionally adjust the size based on the window size or other conditions
+      const width = win.innerWidth;
+      const height = win.innerHeight;
+      
+      // Get container element (must be implemented by subclass)
+      const container = this._getContainer();
+      if (container) {
+        // Example: Adjust max-width/max-height based on conditions
+        container.style.maxWidth = width > 600 ? '50vw' : '80vw';
+        container.style.maxHeight = height > 600 ? '50vh' : '80vh';
+      }
+    }
+
+    /**
+     * Get the container element
+     * Must be implemented by subclasses
+     * @returns {HTMLElement|null} Container element
+     * @protected
+     * @abstract
+     */
+    _getContainer() {
+      throw new Error('_getContainer must be implemented by subclass');
+    }
+
+    /**
+     * Cleanup and destroy the component
+     * Default implementation removes resize listener
+     */
+    disconnectedCallback() {
+      super.disconnectedCallback();
+      
+      // Remove resize listener
+      if (this._window && this.resize) {
+        this._window.removeEventListener('resize', this.resize);
+      }
+      
+      // Clean up window assignment
+      if (this._assignToWindow && this._window && this._window.vc === this) {
+        delete this._window.vc;
+      }
     }
   }
 
@@ -5580,10 +7658,16 @@ var RTChatCore = (function (exports) {
     }
   }
 
+  exports.ActiveUsersListBase = ActiveUsersListBase;
+  exports.ActiveUsersListHTMLElementBase = ActiveUsersListHTMLElementBase;
   exports.AudioControllerInterface = AudioControllerInterface;
   exports.BaseMQTTRTCClient = BaseMQTTRTCClient;
+  exports.CallManagementBase = CallManagementBase;
+  exports.CallManagementHTMLElementBase = CallManagementHTMLElementBase;
   exports.CallManager = CallManager;
   exports.CallUIInterface = CallUIInterface;
+  exports.ChatHeaderBase = ChatHeaderBase;
+  exports.ChatHeaderHTMLElementBase = ChatHeaderHTMLElementBase;
   exports.ChatManager = ChatManager;
   exports.ChatUIInterface = ChatUIInterface;
   exports.ConfigPresets = ConfigPresets;
@@ -5594,6 +7678,10 @@ var RTChatCore = (function (exports) {
   exports.MQTTLoader = MQTTLoader;
   exports.MQTTRTCClient = MQTTRTCClient;
   exports.MemoryAdapter = MemoryAdapter;
+  exports.MessageInputBase = MessageInputBase;
+  exports.MessageInputHTMLElementBase = MessageInputHTMLElementBase;
+  exports.MessagesComponentBase = MessagesComponentBase;
+  exports.MessagesComponentHTMLElementBase = MessagesComponentHTMLElementBase;
   exports.NotificationInterface = NotificationInterface;
   exports.Peer = Peer;
   exports.PluginAdapter = PluginAdapter;
@@ -5606,11 +7694,16 @@ var RTChatCore = (function (exports) {
   exports.StateManager = StateManager;
   exports.StorageAdapter = StorageAdapter;
   exports.StorageInterface = StorageInterface;
+  exports.StreamDisplayBase = StreamDisplayBase;
   exports.StreamDisplayInterface = StreamDisplayInterface;
   exports.TabManager = TabManager;
+  exports.UIComponentBase = UIComponentBase;
   exports.UIConfigInterface = UIConfigInterface;
+  exports.VideoChatBase = VideoChatBase;
+  exports.VideoChatHTMLElementBase = VideoChatHTMLElementBase;
   exports.VideoControllerInterface = VideoControllerInterface;
   exports.VideoInterface = VideoInterface;
+  exports.VideoStreamDisplayBase = VideoStreamDisplayBase;
   exports.deepMerge = deepMerge;
   exports.isObject = isObject;
 

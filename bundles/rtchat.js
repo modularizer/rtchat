@@ -231,7 +231,201 @@ var RTChat = (function (exports) {
   }
 
   /**
+   * VideoStreamDisplayBase - Abstract base class for video stream display components
+   * 
+   * This abstract class defines the contract for displaying video streams from
+   * multiple peers. It is implementation-agnostic and can be implemented using
+   * HTMLElement, React, Vue, or any other framework.
+   * 
+   * Implements StreamDisplayInterface contract.
+   * 
+   * @abstract
+   * @implements StreamDisplayInterface
+   */
+
+
+  class VideoStreamDisplayBase {
+    /**
+     * Create a new VideoStreamDisplayBase instance
+     * @param {HTMLElement|Object} container - Container element or container object
+     * @param {Object} options - Configuration options
+     * @param {string} options.localVideoSize - Size of local video overlay (default: '30%')
+     * @param {string} options.localVideoPosition - Position of local video (default: 'top-right')
+     * @param {class} options.VideoClass - Video class implementing VideoInterface (optional)
+     */
+    constructor(container, options = {}) {
+      if (new.target === VideoStreamDisplayBase) {
+        throw new Error('VideoStreamDisplayBase is abstract and cannot be instantiated directly');
+      }
+      
+      if (!container) {
+        throw new Error('VideoStreamDisplayBase requires a container');
+      }
+      
+      this.container = container;
+      this.options = {
+        localVideoSize: options.localVideoSize || '30%',
+        localVideoPosition: options.localVideoPosition || 'top-right',
+        VideoClass: options.VideoClass,
+        ...options
+      };
+      
+      this.activeStreams = {}; // Track streams by peer name
+    }
+
+    /**
+     * Set video streams for a peer
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @param {Object} streams - Stream objects
+     * @param {MediaStream} streams.localStream - Local media stream
+     * @param {MediaStream} streams.remoteStream - Remote media stream
+     * @abstract
+     */
+    setStreams(peerName, { localStream, remoteStream }) {
+      throw new Error('setStreams must be implemented by subclass');
+    }
+
+    /**
+     * Remove video streams for a peer
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @abstract
+     */
+    removeStreams(peerName) {
+      throw new Error('removeStreams must be implemented by subclass');
+    }
+
+    /**
+     * Show the video container
+     * Default implementation - can be overridden
+     */
+    show() {
+      if (this.container && this.container.style) {
+        if (this.hasActiveStreams()) {
+          this.container.style.display = 'block';
+        }
+      }
+    }
+
+    /**
+     * Hide the video container
+     * Default implementation - can be overridden
+     */
+    hide() {
+      if (this.container && this.container.style) {
+        this.container.style.display = 'none';
+      }
+    }
+
+    /**
+     * Check if there are active streams
+     * @returns {boolean} True if there are active streams
+     */
+    hasActiveStreams() {
+      return Object.keys(this.activeStreams).length > 0;
+    }
+
+    /**
+     * Get list of active peer names
+     * @returns {string[]} Array of peer names with active streams
+     */
+    getActivePeers() {
+      return Object.keys(this.activeStreams);
+    }
+
+    /**
+     * Remove all video streams
+     * Default implementation - can be overridden
+     */
+    removeAllStreams() {
+      const peerNames = Object.keys(this.activeStreams);
+      peerNames.forEach(peerName => this.removeStreams(peerName));
+    }
+
+    /**
+     * Setup track end handlers for a stream
+     * Default implementation - can be overridden
+     * @param {string} peerName - Name of the peer
+     * @param {MediaStream} localStream - Local stream
+     * @param {MediaStream} remoteStream - Remote stream
+     * @protected
+     */
+    _setupTrackEndHandlers(peerName, localStream, remoteStream) {
+      const streamData = this.activeStreams[peerName];
+      if (!streamData) return;
+
+      // Remove existing handlers
+      if (streamData.trackEndHandlers) {
+        streamData.trackEndHandlers.forEach(handler => {
+          if (handler.track && handler.track.onended) {
+            handler.track.onended = null;
+          }
+        });
+      }
+      streamData.trackEndHandlers = [];
+
+      // Setup new handlers
+      const handleTrackEnd = () => {
+        console.log(`Stream track ended for ${peerName}`);
+        this.removeStreams(peerName);
+      };
+
+      if (remoteStream && remoteStream instanceof MediaStream && typeof remoteStream.getTracks === 'function') {
+        remoteStream.getTracks().forEach(track => {
+          track.onended = handleTrackEnd;
+          streamData.trackEndHandlers.push({ track, type: 'remote' });
+        });
+      }
+      if (localStream && localStream instanceof MediaStream && typeof localStream.getTracks === 'function') {
+        localStream.getTracks().forEach(track => {
+          track.onended = handleTrackEnd;
+          streamData.trackEndHandlers.push({ track, type: 'local' });
+        });
+      }
+    }
+
+    /**
+     * Stop all tracks in a stream
+     * @param {MediaStream} stream - Media stream
+     * @protected
+     */
+    _stopStreamTracks(stream) {
+      if (stream && stream instanceof MediaStream && typeof stream.getTracks === 'function') {
+        stream.getTracks().forEach(track => {
+          track.stop();
+        });
+      }
+    }
+
+    /**
+     * Setup CSS styles for video elements
+     * Must be implemented by subclasses if styles are needed
+     * @protected
+     * @abstract
+     */
+    _setupStyles() {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Create a video container element for a peer
+     * Must be implemented by subclasses
+     * @param {string} peerName - Name of the peer
+     * @returns {Object} Object with container and video elements
+     * @protected
+     * @abstract
+     */
+    _createVideoContainer(peerName) {
+      throw new Error('_createVideoContainer must be implemented by subclass');
+    }
+  }
+
+  /**
    * VideoStreamDisplay - Standalone component for displaying WebRTC video streams in chat
+   * 
+   * HTMLElement-based implementation that extends VideoStreamDisplayBase,
+   * which provides the abstract contract for video stream display.
    * 
    * A modular component that manages video elements for multiple peer connections.
    * Uses VideoInterface implementations for local and remote video elements.
@@ -259,7 +453,7 @@ var RTChat = (function (exports) {
    */
 
 
-  class VideoStreamDisplay {
+  class VideoStreamDisplay extends VideoStreamDisplayBase {
     /**
      * Create a new VideoStreamDisplay instance
      * @param {HTMLElement} container - Container element to append video elements to
@@ -269,31 +463,27 @@ var RTChat = (function (exports) {
      * @param {class} options.VideoClass - Video class implementing VideoInterface (default: VideoElement)
      */
     constructor(container, options = {}) {
-      if (!container) {
-        throw new Error('VideoStreamDisplay requires a container element');
-      }
+      super(container, {
+        localVideoSize: options.localVideoSize || '30%',
+        localVideoPosition: options.localVideoPosition || 'top-right',
+        VideoClass: options.VideoClass || VideoElement,
+        ...options
+      });
       
-      this.container = container;
-      this.VideoClass = options.VideoClass || VideoElement;
+      this.VideoClass = this.options.VideoClass;
       
       // Validate VideoClass implements VideoInterface
       if (!this.VideoClass || typeof this.VideoClass !== 'function') {
         throw new Error('VideoClass must be a class implementing VideoInterface');
       }
       
-      this.options = {
-        localVideoSize: options.localVideoSize || '30%',
-        localVideoPosition: options.localVideoPosition || 'top-right',
-        ...options
-      };
-      
-      this.activeStreams = {}; // Track streams by peer name
       this._setupStyles();
     }
 
     /**
      * Set up CSS styles for video elements
-     * @private
+     * Implements VideoStreamDisplayBase._setupStyles
+     * @protected
      */
     _setupStyles() {
       // Get the root node (handles shadow DOM)
@@ -364,6 +554,7 @@ var RTChat = (function (exports) {
 
     /**
      * Set video streams for a peer
+     * Implements VideoStreamDisplayBase.setStreams and StreamDisplayInterface.setStreams
      * @param {string} peerName - Name of the peer
      * @param {Object} streams - Stream objects
      * @param {MediaStream} streams.localStream - Local media stream
@@ -423,9 +614,10 @@ var RTChat = (function (exports) {
 
     /**
      * Create a video container element for a peer
+     * Implements VideoStreamDisplayBase._createVideoContainer
      * @param {string} peerName - Name of the peer
-     * @returns {HTMLElement} Video container element
-     * @private
+     * @returns {Object} Object with container, remoteVideo, and localVideo
+     * @protected
      */
     _createVideoContainer(peerName) {
       const container = document.createElement('div');
@@ -463,46 +655,11 @@ var RTChat = (function (exports) {
       return { container, remoteVideo, localVideo };
     }
 
-    /**
-     * Setup handlers for track end events
-     * @param {string} peerName - Name of the peer
-     * @param {MediaStream} localStream - Local stream
-     * @param {MediaStream} remoteStream - Remote stream
-     * @private
-     */
-    _setupTrackEndHandlers(peerName, localStream, remoteStream) {
-      // Remove existing handlers
-      if (this.activeStreams[peerName].trackEndHandlers) {
-        this.activeStreams[peerName].trackEndHandlers.forEach(handler => {
-          if (handler.track && handler.track.onended) {
-            handler.track.onended = null;
-          }
-        });
-      }
-      this.activeStreams[peerName].trackEndHandlers = [];
-
-      // Setup new handlers - only if streams are valid MediaStream objects
-      const handleTrackEnd = () => {
-        console.log(`Stream track ended for ${peerName}`);
-        this.removeStreams(peerName);
-      };
-
-      if (remoteStream && remoteStream instanceof MediaStream && typeof remoteStream.getTracks === 'function') {
-        remoteStream.getTracks().forEach(track => {
-          track.onended = handleTrackEnd;
-          this.activeStreams[peerName].trackEndHandlers.push({ track, type: 'remote' });
-        });
-      }
-      if (localStream && localStream instanceof MediaStream && typeof localStream.getTracks === 'function') {
-        localStream.getTracks().forEach(track => {
-          track.onended = handleTrackEnd;
-          this.activeStreams[peerName].trackEndHandlers.push({ track, type: 'local' });
-        });
-      }
-    }
+    // _setupTrackEndHandlers is inherited from VideoStreamDisplayBase
 
     /**
      * Remove video streams for a peer
+     * Implements VideoStreamDisplayBase.removeStreams and StreamDisplayInterface.removeStreams
      * @param {string} peerName - Name of the peer
      */
     removeStreams(peerName) {
@@ -511,18 +668,10 @@ var RTChat = (function (exports) {
         return;
       }
 
-      // Stop all tracks - only if streams are valid MediaStream objects
+      // Stop all tracks using base class helper
       if (streamData.streams) {
-        if (streamData.streams.local && streamData.streams.local instanceof MediaStream && typeof streamData.streams.local.getTracks === 'function') {
-          streamData.streams.local.getTracks().forEach(track => {
-            track.stop();
-          });
-        }
-        if (streamData.streams.remote && streamData.streams.remote instanceof MediaStream && typeof streamData.streams.remote.getTracks === 'function') {
-          streamData.streams.remote.getTracks().forEach(track => {
-            track.stop();
-          });
-        }
+        this._stopStreamTracks(streamData.streams.local);
+        this._stopStreamTracks(streamData.streams.remote);
       }
 
       // Remove track end handlers
@@ -562,45 +711,8 @@ var RTChat = (function (exports) {
       }
     }
 
-    /**
-     * Remove all video streams
-     */
-    removeAllStreams() {
-      const peerNames = Object.keys(this.activeStreams);
-      peerNames.forEach(peerName => this.removeStreams(peerName));
-    }
-
-    /**
-     * Check if there are active streams
-     * @returns {boolean} True if there are active streams
-     */
-    hasActiveStreams() {
-      return Object.keys(this.activeStreams).length > 0;
-    }
-
-    /**
-     * Get list of active peer names
-     * @returns {string[]} Array of peer names with active streams
-     */
-    getActivePeers() {
-      return Object.keys(this.activeStreams);
-    }
-
-    /**
-     * Show the video container
-     */
-    show() {
-      if (this.hasActiveStreams()) {
-        this.container.style.display = 'block';
-      }
-    }
-
-    /**
-     * Hide the video container
-     */
-    hide() {
-      this.container.style.display = 'none';
-    }
+    // removeAllStreams, hasActiveStreams, getActivePeers, show, and hide
+    // are inherited from VideoStreamDisplayBase
   }
 
   /**
@@ -1562,9 +1674,10 @@ var RTChat = (function (exports) {
         <div id="call-info-container"></div>
         <div id="call-controls-container">
           <span style="font-weight: bold; margin-right: 8px;">Call Controls:</span>
-          <button id="call-mute-mic-btn" class="call-control-button" title="Mute/Unmute microphone">Mute Mic</button>
-          <button id="call-mute-speakers-btn" class="call-control-button" title="Mute/Unmute speakers">Mute Speakers</button>
-          <button id="call-video-toggle-btn" class="call-control-button" title="Hide/Show video" style="display: none;">Hide Video</button>
+          <button id="call-mute-mic-btn" class="call-control-button" title="Toggle microphone on/off">Mic</button>
+          <button id="call-mute-speakers-btn" class="call-control-button" title="Toggle speakers on/off">Speakers</button>
+          <button id="call-video-toggle-btn" class="call-control-button" title="Toggle camera on/off">Camera</button>
+          <button id="end-call-button" class="call-control-button end-call" title="End call" style="background-color: #f44336; color: white;">End</button>
           <span id="call-metrics"></span>
         </div>
       `;
@@ -1575,29 +1688,130 @@ var RTChat = (function (exports) {
           infoContainer.id = 'call-info-container';
           existingButtonsContainer.after(infoContainer);
         }
+        
+        // Check if end call button exists in call-buttons-container and needs to be moved
+        const existingEndCallButton = existingButtonsContainer.querySelector('#end-call-button');
+        
         if (!this.container.querySelector('#call-controls-container')) {
           const controlsContainer = document.createElement('div');
           controlsContainer.id = 'call-controls-container';
           controlsContainer.innerHTML = `
           <span style="font-weight: bold; margin-right: 8px;">Call Controls:</span>
-          <button id="call-mute-mic-btn" class="call-control-button" title="Mute/Unmute microphone">Mute Mic</button>
-          <button id="call-mute-speakers-btn" class="call-control-button" title="Mute/Unmute speakers">Mute Speakers</button>
-          <button id="call-video-toggle-btn" class="call-control-button" title="Hide/Show video" style="display: none;">Hide Video</button>
+          <button id="call-mute-mic-btn" class="call-control-button" title="Toggle microphone on/off">Mic</button>
+          <button id="call-mute-speakers-btn" class="call-control-button" title="Toggle speakers on/off">Speakers</button>
+          <button id="call-video-toggle-btn" class="call-control-button" title="Toggle camera on/off">Camera</button>
           <span id="call-metrics"></span>
         `;
           this.container.appendChild(controlsContainer);
+          
+          // Move existing end call button to call-controls-container if it exists
+          if (existingEndCallButton) {
+            // Update the button styling and class
+            existingEndCallButton.className = 'call-control-button end-call';
+            existingEndCallButton.style.backgroundColor = '#f44336';
+            existingEndCallButton.style.color = 'white';
+            // Move it to call-controls-container (before metrics span)
+            const metricsSpan = controlsContainer.querySelector('#call-metrics');
+            if (metricsSpan) {
+              controlsContainer.insertBefore(existingEndCallButton, metricsSpan);
+            } else {
+              controlsContainer.appendChild(existingEndCallButton);
+            }
+          } else {
+            // Create new end call button if it doesn't exist
+            const endCallBtn = document.createElement('button');
+            endCallBtn.id = 'end-call-button';
+            endCallBtn.className = 'call-control-button end-call';
+            endCallBtn.title = 'End call';
+            endCallBtn.textContent = 'End';
+            endCallBtn.style.backgroundColor = '#f44336';
+            endCallBtn.style.color = 'white';
+            const metricsSpan = controlsContainer.querySelector('#call-metrics');
+            if (metricsSpan) {
+              controlsContainer.insertBefore(endCallBtn, metricsSpan);
+            } else {
+              controlsContainer.appendChild(endCallBtn);
+            }
+          }
+        } else {
+          // call-controls-container already exists, but we still need to move the end call button
+          const controlsContainer = this.container.querySelector('#call-controls-container');
+          const existingEndCallInControls = controlsContainer.querySelector('#end-call-button');
+          
+          if (existingEndCallButton && !existingEndCallInControls) {
+            // Move end call button from call-buttons-container to call-controls-container
+            existingEndCallButton.className = 'call-control-button end-call';
+            existingEndCallButton.style.backgroundColor = '#f44336';
+            existingEndCallButton.style.color = 'white';
+            const metricsSpan = controlsContainer.querySelector('#call-metrics');
+            if (metricsSpan) {
+              controlsContainer.insertBefore(existingEndCallButton, metricsSpan);
+            } else {
+              controlsContainer.appendChild(existingEndCallButton);
+            }
+          } else if (!existingEndCallButton && !existingEndCallInControls) {
+            // Create new end call button if neither exists
+            const endCallBtn = document.createElement('button');
+            endCallBtn.id = 'end-call-button';
+            endCallBtn.className = 'call-control-button end-call';
+            endCallBtn.title = 'End call';
+            endCallBtn.textContent = 'End';
+            endCallBtn.style.backgroundColor = '#f44336';
+            endCallBtn.style.color = 'white';
+            const metricsSpan = controlsContainer.querySelector('#call-metrics');
+            if (metricsSpan) {
+              controlsContainer.insertBefore(endCallBtn, metricsSpan);
+            } else {
+              controlsContainer.appendChild(endCallBtn);
+            }
+          }
         }
       }
       
+      this.buttonsContainer = this.container.querySelector('#call-buttons-container');
       this.callInfoContainer = this.container.querySelector('#call-info-container');
       this.callControlsContainer = this.container.querySelector('#call-controls-container');
       this.muteMicBtn = this.container.querySelector('#call-mute-mic-btn');
       this.muteSpeakersBtn = this.container.querySelector('#call-mute-speakers-btn');
       this.videoToggleBtn = this.container.querySelector('#call-video-toggle-btn');
+      this.endCallButton = this.container.querySelector('#end-call-button');
       this.metricsSpan = this.container.querySelector('#call-metrics');
       
       this.callInfoItems = new Map(); // Map<user, HTMLElement>
       this.incomingCallPrompts = new Map(); // Map<user, {element: HTMLElement, resolve: Function}>
+      
+      // Ensure end call button is in the correct location (call-controls-container, not call-buttons-container)
+      this._ensureEndCallButtonInCorrectLocation();
+    }
+    
+    /**
+     * Ensure the end call button is in call-controls-container, not call-buttons-container
+     * @private
+     */
+    _ensureEndCallButtonInCorrectLocation() {
+      const buttonsContainer = this.container.querySelector('#call-buttons-container');
+      const controlsContainer = this.container.querySelector('#call-controls-container');
+      const endCallButton = this.container.querySelector('#end-call-button');
+      
+      if (!endCallButton || !controlsContainer) {
+        return;
+      }
+      
+      // If end call button is in call-buttons-container, move it to call-controls-container
+      if (buttonsContainer && buttonsContainer.contains(endCallButton)) {
+        endCallButton.className = 'call-control-button end-call';
+        endCallButton.style.backgroundColor = '#f44336';
+        endCallButton.style.color = 'white';
+        const metricsSpan = controlsContainer.querySelector('#call-metrics');
+        if (metricsSpan) {
+          controlsContainer.insertBefore(endCallButton, metricsSpan);
+        } else {
+          controlsContainer.appendChild(endCallButton);
+        }
+      }
+      
+      // Update reference
+      this.endCallButton = endCallButton;
     }
 
     /**
@@ -1623,6 +1837,17 @@ var RTChat = (function (exports) {
         this.videoToggleBtn.addEventListener('click', () => {
           const currentState = this.callManager.getMuteState();
           this.callManager.setVideoHidden(!currentState.video);
+        });
+      }
+      
+      // End call button handler
+      if (this.endCallButton) {
+        this.endCallButton.addEventListener('click', () => {
+          console.log('End call button clicked from CallManagement');
+          // End all active calls
+          if (this.callManager && typeof this.callManager.endAllCalls === 'function') {
+            this.callManager.endAllCalls();
+          }
         });
       }
     }
@@ -1658,8 +1883,127 @@ var RTChat = (function (exports) {
      */
     _updateFromCallManager() {
       const activeCalls = this.callManager.getActiveCalls();
-      this._updateVisibility(activeCalls.audio, activeCalls.video);
-      this._updateCallInfo(activeCalls.audio, activeCalls.video);
+      const pendingCalls = this.callManager.getPendingCalls();
+      const hasActiveCalls = activeCalls.audio.size > 0 || activeCalls.video.size > 0;
+      const hasPendingCalls = pendingCalls.size > 0;
+      
+      // Determine current state and apply it
+      if (!hasActiveCalls && !hasPendingCalls) {
+        // State 1: No call (inactive)
+        this._setStateInactive();
+      } else if (hasPendingCalls && !hasActiveCalls) {
+        // State 2: Pending call
+        this._setStatePending();
+      } else if (hasActiveCalls) {
+        // State 3: Active call
+        this._setStateActive(activeCalls.audio, activeCalls.video);
+      }
+    }
+
+    /**
+     * Set UI to State 1: No call (inactive)
+     * @private
+     */
+    _setStateInactive() {
+      // Set to inactive state - container remains in DOM and visible for start call buttons
+      // The container should be visible so users can start new calls
+      this.container.classList.remove('active');
+      this.container.classList.remove('hidden');
+      // Ensure container is visible (buttons should be shown)
+      this.container.style.display = 'flex';
+      
+      // Show buttons container (for start call buttons)
+      if (this.buttonsContainer) {
+        this.buttonsContainer.style.display = 'flex';
+      }
+      
+      // Hide call controls and info containers (only show when active)
+      if (this.callControlsContainer) {
+        this.callControlsContainer.classList.remove('active');
+        this.callControlsContainer.style.display = 'none';
+      }
+      if (this.callInfoContainer) {
+        this.callInfoContainer.classList.remove('active');
+        this.callInfoContainer.style.display = 'none';
+      }
+      
+      // Clear call info items (these are dynamically created, so removing is OK)
+      for (const [user, item] of this.callInfoItems.entries()) {
+        if (item && item.parentNode) {
+          item.parentNode.removeChild(item);
+        }
+      }
+      this.callInfoItems.clear();
+      
+      // Clear metrics (non-destructive - just clear text)
+      if (this.metricsSpan) {
+        this.metricsSpan.textContent = '';
+      }
+      
+      // Reset button states (non-destructive)
+      this._updateButtonStates();
+      
+      // Container remains in DOM and visible with start call buttons ready
+      // All sub-containers remain in DOM, just hidden
+    }
+
+    /**
+     * Set UI to State 2: Pending call
+     * @private
+     */
+    _setStatePending() {
+      // Show call-management container (for incoming call prompt)
+      this.container.classList.add('active');
+      this.container.classList.remove('hidden');
+      this.container.style.display = 'flex';
+      
+      // Hide controls and info (only prompt should be visible)
+      // Non-destructive - just hide, containers remain in DOM
+      if (this.callControlsContainer) {
+        this.callControlsContainer.classList.remove('active');
+        this.callControlsContainer.style.display = 'none';
+      }
+      if (this.callInfoContainer) {
+        this.callInfoContainer.classList.remove('active');
+        this.callInfoContainer.style.display = 'none';
+      }
+      
+      // Clear call info items (prompt is shown separately)
+      for (const [user, item] of this.callInfoItems.entries()) {
+        if (item && item.parentNode) {
+          item.parentNode.removeChild(item);
+        }
+      }
+      this.callInfoItems.clear();
+      
+      // Clear metrics
+      if (this.metricsSpan) {
+        this.metricsSpan.textContent = '';
+      }
+    }
+
+    /**
+     * Set UI to State 3: Active call
+     * @private
+     */
+    _setStateActive(audioCalls, videoCalls) {
+      // Show call-management container
+      this.container.classList.add('active');
+      this.container.classList.remove('hidden');
+      this.container.style.display = 'flex';
+      
+      // Show controls and info (non-destructive - ensure they're visible)
+      if (this.callControlsContainer) {
+        this.callControlsContainer.classList.add('active');
+        this.callControlsContainer.style.display = '';
+      }
+      if (this.callInfoContainer) {
+        this.callInfoContainer.classList.add('active');
+        this.callInfoContainer.style.display = '';
+      }
+      
+      // Update call info, button states, and metrics
+      this._updateCallInfo(audioCalls, videoCalls);
       this._updateButtonStates();
       this._updateMetrics();
     }
@@ -1720,18 +2064,6 @@ var RTChat = (function (exports) {
       this._updateMetrics();
     }
 
-    /**
-     * Update visibility of the call management section
-     * @private
-     */
-    _updateVisibility(audioCalls, videoCalls) {
-      const hasActiveCalls = audioCalls.size > 0 || videoCalls.size > 0;
-      if (hasActiveCalls) {
-        this.container.classList.add('active');
-      } else {
-        this.container.classList.remove('active');
-      }
-    }
 
     /**
      * Show an incoming call prompt
@@ -1779,11 +2111,43 @@ var RTChat = (function (exports) {
       
       const callType = callInfo.video ? 'video' : 'audio';
       const callTypeIcon = callInfo.video ? '📹' : '🔊';
-      promptElement.innerHTML = `
-      <div style="font-weight: bold; font-size: 1.1em;">
-        ${callTypeIcon} Incoming ${callType} call from ${peerName}
-      </div>
-      <div style="display: flex; gap: 8px;">
+      const isVideoCall = callInfo.video === true;
+      
+      // For video calls, show three options: Answer as Video, Answer as Audio, Decline
+      // For audio calls, show two options: Accept, Reject
+      let buttonsHTML = '';
+      if (isVideoCall) {
+        buttonsHTML = `
+        <button class="accept-video-btn" style="
+          padding: 8px 16px;
+          background-color: white;
+          color: #4CAF50;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-weight: bold;
+        ">📹 Answer as Video</button>
+        <button class="accept-audio-btn" style="
+          padding: 8px 16px;
+          background-color: #2196F3;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-weight: bold;
+        ">🔊 Answer as Audio</button>
+        <button class="reject-call-btn" style="
+          padding: 8px 16px;
+          background-color: #f44336;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-weight: bold;
+        ">Decline</button>
+      `;
+      } else {
+        buttonsHTML = `
         <button class="accept-call-btn" style="
           padding: 8px 16px;
           background-color: white;
@@ -1802,28 +2166,98 @@ var RTChat = (function (exports) {
           cursor: pointer;
           font-weight: bold;
         ">Reject</button>
+      `;
+      }
+      
+      promptElement.innerHTML = `
+      <div style="font-weight: bold; font-size: 1.1em;">
+        ${callTypeIcon} Incoming ${callType} call from ${peerName}
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
+        ${buttonsHTML}
       </div>
     `;
       
       // Create promise for accept/reject
+      // Promise can resolve to:
+      // - true: accept with original callInfo (for video calls, means accept as video)
+      // - {video: false, audio: true}: accept as audio only (for video calls)
+      // - false: reject
       let resolvePrompt;
       const promptPromise = new Promise((resolve) => {
         resolvePrompt = resolve;
       });
       
       // Set up button handlers
-      const acceptBtn = promptElement.querySelector('.accept-call-btn');
-      const rejectBtn = promptElement.querySelector('.reject-call-btn');
-      
-      acceptBtn.addEventListener('click', () => {
-        this.hideIncomingCallPrompt(peerName);
-        resolvePrompt(true);
-      });
-      
-      rejectBtn.addEventListener('click', () => {
-        this.hideIncomingCallPrompt(peerName);
-        resolvePrompt(false);
-      });
+      if (isVideoCall) {
+        // Video call: three buttons
+        const acceptVideoBtn = promptElement.querySelector('.accept-video-btn');
+        const acceptAudioBtn = promptElement.querySelector('.accept-audio-btn');
+        const rejectBtn = promptElement.querySelector('.reject-call-btn');
+        
+        acceptVideoBtn.addEventListener('click', () => {
+          this.hideIncomingCallPrompt(peerName);
+          // Return true to accept with original callInfo (video + audio)
+          resolvePrompt(true);
+        });
+        
+        acceptAudioBtn.addEventListener('click', () => {
+          this.hideIncomingCallPrompt(peerName);
+          // Return modified callInfo to accept as audio only
+          resolvePrompt({video: false, audio: true});
+        });
+        
+        rejectBtn.addEventListener('click', () => {
+          // Stop ringing immediately
+          if (this.callManager && this.callManager.ringer && typeof this.callManager.ringer.stop === 'function') {
+            this.callManager.ringer.stop();
+          }
+          
+          // Hide the prompt first
+          this.hideIncomingCallPrompt(peerName);
+          
+          // CRITICAL: End the call FIRST to send "endcall" message to caller
+          // This ensures the caller receives the message and their UI updates
+          if (this.callManager) {
+            this.callManager.endCall(peerName);
+          }
+          
+          // Then resolve promise to false to indicate rejection
+          // This will cause RTC client to reject the call (which also sends "endcall" via catch handler)
+          // But we've already sent it above, so this is just for cleanup
+          resolvePrompt(false);
+        });
+      } else {
+        // Audio call: two buttons (same as before)
+        const acceptBtn = promptElement.querySelector('.accept-call-btn');
+        const rejectBtn = promptElement.querySelector('.reject-call-btn');
+        
+        acceptBtn.addEventListener('click', () => {
+          this.hideIncomingCallPrompt(peerName);
+          resolvePrompt(true);
+        });
+        
+        rejectBtn.addEventListener('click', () => {
+          // Stop ringing immediately
+          if (this.callManager && this.callManager.ringer && typeof this.callManager.ringer.stop === 'function') {
+            this.callManager.ringer.stop();
+          }
+          
+          // Hide the prompt first
+          this.hideIncomingCallPrompt(peerName);
+          
+          // CRITICAL: End the call FIRST to send "endcall" message to caller
+          // This ensures the caller receives the message and their UI updates
+          if (this.callManager) {
+            this.callManager.endCall(peerName);
+          }
+          
+          // Then resolve promise to false to indicate rejection
+          // This will cause RTC client to reject the call (which also sends "endcall" via catch handler)
+          // But we've already sent it above, so this is just for cleanup
+          resolvePrompt(false);
+        });
+      }
       
       // Store prompt
       this.incomingCallPrompts.set(peerName, {
@@ -1999,22 +2433,29 @@ var RTChat = (function (exports) {
       const hasVideoCalls = activeCalls.video.size > 0;
       
       if (this.muteMicBtn) {
-        this.muteMicBtn.textContent = muteState.mic ? 'Unmute Mic' : 'Mute Mic';
-        this.muteMicBtn.title = muteState.mic ? 'Unmute microphone' : 'Mute microphone';
+        // Toggle button: show "Mic" with active state and strikethrough when muted
+        this.muteMicBtn.textContent = 'Mic';
+        this.muteMicBtn.title = muteState.mic ? 'Microphone is muted - click to unmute' : 'Microphone is on - click to mute';
         this.muteMicBtn.classList.toggle('active', muteState.mic);
+        this.muteMicBtn.style.textDecoration = muteState.mic ? 'line-through' : 'none';
       }
       
       if (this.muteSpeakersBtn) {
-        this.muteSpeakersBtn.textContent = muteState.speakers ? 'Unmute Speakers' : 'Mute Speakers';
-        this.muteSpeakersBtn.title = muteState.speakers ? 'Unmute speakers' : 'Mute speakers';
+        // Toggle button: show "Speakers" with active state and strikethrough when muted
+        this.muteSpeakersBtn.textContent = 'Speakers';
+        this.muteSpeakersBtn.title = muteState.speakers ? 'Speakers are muted - click to unmute' : 'Speakers are on - click to mute';
         this.muteSpeakersBtn.classList.toggle('active', muteState.speakers);
+        this.muteSpeakersBtn.style.textDecoration = muteState.speakers ? 'line-through' : 'none';
       }
       
       if (this.videoToggleBtn) {
+        // Show camera button only for video calls
         this.videoToggleBtn.style.display = hasVideoCalls ? 'inline-block' : 'none';
-        this.videoToggleBtn.textContent = muteState.video ? 'Show Video' : 'Hide Video';
-        this.videoToggleBtn.title = muteState.video ? 'Show video' : 'Hide video';
+        // Toggle button: show "Camera" with active state and strikethrough when hidden
+        this.videoToggleBtn.textContent = 'Camera';
+        this.videoToggleBtn.title = muteState.video ? 'Camera is hidden - click to show' : 'Camera is on - click to hide';
         this.videoToggleBtn.classList.toggle('active', muteState.video);
+        this.videoToggleBtn.style.textDecoration = muteState.video ? 'line-through' : 'none';
       }
     }
 
@@ -2411,7 +2852,10 @@ var RTChat = (function (exports) {
       if (this.rtcClient.on) {
         this.rtcClient.on('call', this._handleIncomingCall);
         this.rtcClient.on('callconnected', this._handleCallConnected);
-        this.rtcClient.on('callended', this._handleCallEnded);
+        this.rtcClient.on('callended', (user) => {
+          console.log("CallManager: Received 'callended' event from RTC client for " + user);
+          this._handleCallEnded(user);
+        });
         this.rtcClient.on('disconnectedfrompeer', (user) => {
           this._handleDisconnectedFromUser(user);
         });
@@ -2546,7 +2990,35 @@ var RTChat = (function (exports) {
      * @private
      */
     _handleCallEnded(peerName) {
-      // Clear timeouts
+      console.log("CallManager._handleCallEnded: Called for " + peerName);
+      // Check if call is already ended (idempotent)
+      const currentState = this.callState.getUserState(peerName);
+      if (currentState && currentState.status === 'inactive') {
+        // Already ended, skip
+        console.log("CallManager._handleCallEnded: Call already ended for " + peerName + ", skipping");
+        return;
+      }
+      
+      // CRITICAL: Collect all users with active/pending calls BEFORE updating any state
+      // This ensures we get the complete list of all calls that need to be ended
+      const activeCallsBefore = this.callState.getActiveCalls();
+      const pendingCallsBefore = this.callState.getPendingCalls();
+      const allUsersToEnd = new Set([
+        ...activeCallsBefore.audio,
+        ...activeCallsBefore.video,
+        ...pendingCallsBefore,
+        ...this.outgoingCalls.keys()
+      ]);
+      
+      console.log("CallManager._handleCallEnded: Found calls to end:", {
+        activeAudio: Array.from(activeCallsBefore.audio),
+        activeVideo: Array.from(activeCallsBefore.video),
+        pending: Array.from(pendingCallsBefore),
+        outgoing: Array.from(this.outgoingCalls.keys()),
+        allUsersToEnd: Array.from(allUsersToEnd)
+      });
+      
+      // Clear timeouts for the primary peer
       const pendingCall = this.pendingCalls.get(peerName);
       if (pendingCall && pendingCall.timeoutId) {
         clearTimeout(pendingCall.timeoutId);
@@ -2559,7 +3031,7 @@ var RTChat = (function (exports) {
       }
       this.outgoingCalls.delete(peerName);
       
-      // Update unified call state
+      // Update unified call state for the primary peer
       this.callState.setUserState(peerName, {
         status: 'inactive',
         audio: false,
@@ -2569,16 +3041,50 @@ var RTChat = (function (exports) {
       this.localStreams.delete(peerName);
       this.latencyMetrics.delete(peerName);
       
-      // Stop stats polling if no active calls
-      const activeCalls = this.callState.getActiveCalls();
-      if (activeCalls.video.size === 0 && activeCalls.audio.size === 0) {
-        this._stopStatsPolling();
-        // Reset mute states
-        this.muteState = { mic: false, speakers: false, video: false };
+      // CRITICAL: Emit callended event for the primary call - this must always happen
+      this.emit('callended', { peerName });
+      
+      // End all other remaining calls (excluding the one we just ended)
+      for (const otherUser of allUsersToEnd) {
+        if (otherUser !== peerName) {
+          // End call with RTC client to send message
+          if (this.rtcClient && this.rtcClient.endCallWithUser) {
+            try {
+              this.rtcClient.endCallWithUser(otherUser);
+            } catch (err) {
+              console.warn(`Error ending call with ${otherUser}:`, err);
+            }
+          }
+          
+          // Update state for other user
+          const otherPendingCall = this.pendingCalls.get(otherUser);
+          if (otherPendingCall && otherPendingCall.timeoutId) {
+            clearTimeout(otherPendingCall.timeoutId);
+          }
+          this.pendingCalls.delete(otherUser);
+          
+          const otherOutgoingCall = this.outgoingCalls.get(otherUser);
+          if (otherOutgoingCall && otherOutgoingCall.timeoutId) {
+            clearTimeout(otherOutgoingCall.timeoutId);
+          }
+          this.outgoingCalls.delete(otherUser);
+          
+          this.callState.setUserState(otherUser, {
+            status: 'inactive',
+            audio: false,
+            video: false
+          });
+          this.localStreams.delete(otherUser);
+          this.latencyMetrics.delete(otherUser);
+          
+          // CRITICAL: Emit callended event for each other user
+          this.emit('callended', { peerName: otherUser });
+        }
       }
       
-      // Emit event
-      this.emit('callended', { peerName });
+      // Stop stats polling and reset mute states (all calls are now ended)
+      this._stopStatsPolling();
+      this.muteState = { mic: false, speakers: false, video: false };
     }
 
     /**
@@ -2588,11 +3094,12 @@ var RTChat = (function (exports) {
      * @private
      */
     _handleCallTimeout(peerName, direction) {
-      // Clear pending/outgoing call
-      this.pendingCalls.delete(peerName);
-      this.outgoingCalls.delete(peerName);
+      // Stop ringing if ringer is provided
+      if (this.ringer && typeof this.ringer.stop === 'function') {
+        this.ringer.stop();
+      }
       
-      // End call with RTC client
+      // End call with RTC client to send message
       if (this.rtcClient && this.rtcClient.endCallWithUser) {
         try {
           this.rtcClient.endCallWithUser(peerName);
@@ -2601,22 +3108,10 @@ var RTChat = (function (exports) {
         }
       }
       
-      // Update unified call state
-      this.callState.setUserState(peerName, {
-        status: 'inactive',
-        audio: false,
-        video: false
-      });
+      // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
+      this._handleCallEnded(peerName);
       
-      this.localStreams.delete(peerName);
-      this.latencyMetrics.delete(peerName);
-      
-      // Stop ringing if ringer is provided
-      if (this.ringer && typeof this.ringer.stop === 'function') {
-        this.ringer.stop();
-      }
-      
-      // Emit event
+      // Emit timeout event for UI notifications
       this.emit('calltimeout', { peerName, direction });
       
       // Use callUI if provided
@@ -2734,8 +3229,12 @@ var RTChat = (function (exports) {
         
         // Check if call was rejected
         if (err === "Call rejected" || err?.message === "Call rejected") {
+          // CRITICAL: When call is rejected, end ALL calls and emit events
+          this._handleCallEnded(user);
           this.emit('callrejected', { user });
         } else {
+          // For other errors, also end all calls to ensure clean state
+          this._handleCallEnded(user);
           this.emit('callerror', { user, error: err });
         }
         
@@ -2748,6 +3247,8 @@ var RTChat = (function (exports) {
      * @param {string} user - Name of the user
      */
     endCall(user) {
+      // First, tell RTC client to end the call and send "endcall" message to peer
+      // This must happen while the call is still active so the message can be sent
       if (this.rtcClient && this.rtcClient.endCallWithUser) {
         try {
           this.rtcClient.endCallWithUser(user);
@@ -2756,7 +3257,9 @@ var RTChat = (function (exports) {
         }
       }
       
-      // Cleanup will happen via callended event
+      // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
+      // This ensures when any call ends, all other calls are also ended
+      this._handleCallEnded(user);
     }
 
     /**
@@ -2937,21 +3440,36 @@ var RTChat = (function (exports) {
         
         try {
           const streamConnection = connection.streamConnection;
-          if (streamConnection && streamConnection.connectionState === 'connected') {
+          // Check if stream connection exists and is in a connected state
+          if (streamConnection && (streamConnection.iceConnectionState === 'connected' || streamConnection.iceConnectionState === 'completed')) {
             const stats = await streamConnection.getStats();
             
             let rtt = null;
             let packetLoss = null;
             let jitter = null;
             
-            // Parse stats
+            // Parse stats - WebRTC stats API structure
             for (const [id, report] of stats.entries()) {
+              // Try multiple ways to get RTT
               if (report.type === 'candidate-pair' && report.state === 'succeeded') {
-                if (report.currentRoundTripTime !== undefined) {
-                  rtt = report.currentRoundTripTime * 1000; // Convert to ms
+                // currentRoundTripTime is in seconds, convert to ms
+                if (report.currentRoundTripTime !== undefined && report.currentRoundTripTime > 0) {
+                  rtt = report.currentRoundTripTime * 1000;
+                } else if (report.roundTripTime !== undefined && report.roundTripTime > 0) {
+                  rtt = report.roundTripTime * 1000;
                 }
               }
               
+              // Also check transport stats for RTT
+              if (report.type === 'transport') {
+                if (report.currentRoundTripTime !== undefined && report.currentRoundTripTime > 0) {
+                  rtt = report.currentRoundTripTime * 1000;
+                } else if (report.rtt !== undefined && report.rtt > 0) {
+                  rtt = report.rtt * 1000;
+                }
+              }
+              
+              // Get audio stats
               if (report.type === 'inbound-rtp' && report.mediaType === 'audio') {
                 if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
                   const totalPackets = report.packetsLost + report.packetsReceived;
@@ -2959,11 +3477,13 @@ var RTChat = (function (exports) {
                     packetLoss = (report.packetsLost / totalPackets) * 100;
                   }
                 }
-                if (report.jitter !== undefined) {
-                  jitter = report.jitter * 1000; // Convert to ms
+                // jitter is already in seconds, convert to ms
+                if (report.jitter !== undefined && report.jitter > 0) {
+                  jitter = report.jitter * 1000;
                 }
               }
               
+              // Get video stats (for packet loss if audio didn't have it)
               if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
                 if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
                   const totalPackets = report.packetsLost + report.packetsReceived;
@@ -2977,11 +3497,20 @@ var RTChat = (function (exports) {
               }
             }
             
+            // Only update metrics if we got at least one valid value
+            // This prevents overwriting with null values
+            const currentMetrics = this.latencyMetrics.get(user) || { rtt: null, packetLoss: null, jitter: null };
+            const updatedMetrics = {
+              rtt: rtt !== null ? rtt : currentMetrics.rtt,
+              packetLoss: packetLoss !== null ? packetLoss : currentMetrics.packetLoss,
+              jitter: jitter !== null ? jitter : currentMetrics.jitter
+            };
+            
             // Store metrics
-            this.latencyMetrics.set(user, { rtt, packetLoss, jitter });
+            this.latencyMetrics.set(user, updatedMetrics);
             
             // Emit event
-            this.emit('metricsupdated', { user, metrics: { rtt, packetLoss, jitter } });
+            this.emit('metricsupdated', { user, metrics: updatedMetrics });
           }
         } catch (err) {
           console.warn(`Error collecting stats for ${user}:`, err);
@@ -3519,25 +4048,155 @@ var RTChat = (function (exports) {
   }
 
   /**
-   * ChatHeader - Component for chat header with room and name inputs
+   * UIComponentBase - Abstract base class for UI components that extend HTMLElement
    * 
-   * @class ChatHeader
-   * @extends HTMLElement
+   * This base class provides common functionality for all UI components:
+   * - Shadow DOM setup
+   * - Configuration management
+   * - Lifecycle hooks
+   * - Event handling utilities
+   * 
+   * All UI components that extend HTMLElement should extend this class.
+   * 
+   * @abstract
    */
-  class ChatHeader extends HTMLElement {
+  class UIComponentBase extends HTMLElement {
+    /**
+     * Create a new UIComponentBase instance
+     * @param {Object} config - Configuration object
+     */
     constructor(config = {}) {
       super();
       
-      this.config = {
+      // Store configuration
+      this.config = { ...config };
+      
+      // Initialize shadow DOM (can be overridden)
+      this._initShadowDOM();
+      
+      // Setup lifecycle
+      this._initialized = false;
+    }
+
+    /**
+     * Initialize shadow DOM (can be overridden by subclasses)
+     * @protected
+     */
+    _initShadowDOM() {
+      // Default: open shadow DOM
+      // Subclasses can override to use closed shadow DOM or no shadow DOM
+      this.attachShadow({ mode: 'open' });
+    }
+
+    /**
+     * Called when element is connected to DOM
+     * Subclasses should override connectedCallback() and call super.connectedCallback()
+     */
+    connectedCallback() {
+      if (!this._initialized) {
+        this._initialize();
+        this._initialized = true;
+      }
+    }
+
+    /**
+     * Called when element is disconnected from DOM
+     * Subclasses should override disconnectedCallback() and call super.disconnectedCallback()
+     */
+    disconnectedCallback() {
+      // Cleanup can be done here
+    }
+
+    /**
+     * Initialize the component
+     * Subclasses should override this method
+     * @protected
+     */
+    _initialize() {
+      // Override in subclasses
+    }
+
+    /**
+     * Get configuration value
+     * @param {string} key - Configuration key
+     * @param {*} defaultValue - Default value if key not found
+     * @returns {*} Configuration value
+     */
+    getConfig(key, defaultValue = undefined) {
+      return this.config[key] !== undefined ? this.config[key] : defaultValue;
+    }
+
+    /**
+     * Set configuration value
+     * @param {string} key - Configuration key
+     * @param {*} value - Configuration value
+     */
+    setConfig(key, value) {
+      this.config[key] = value;
+    }
+
+    /**
+     * Dispatch a custom event
+     * @param {string} eventName - Event name
+     * @param {Object} detail - Event detail object
+     * @param {boolean} bubbles - Whether event bubbles (default: true)
+     * @param {boolean} composed - Whether event crosses shadow DOM boundary (default: true)
+     */
+    dispatchCustomEvent(eventName, detail = {}, bubbles = true, composed = true) {
+      this.dispatchEvent(new CustomEvent(eventName, {
+        detail,
+        bubbles,
+        composed
+      }));
+    }
+
+    /**
+     * Get the root element (shadow root or this)
+     * @returns {ShadowRoot|HTMLElement} Root element
+     */
+    getRoot() {
+      return this.shadowRoot || this;
+    }
+
+    /**
+     * Query selector in root
+     * @param {string} selector - CSS selector
+     * @returns {HTMLElement|null} Element or null
+     */
+    queryRoot(selector) {
+      const root = this.getRoot();
+      return root.querySelector ? root.querySelector(selector) : null;
+    }
+
+    /**
+     * Query selector all in root
+     * @param {string} selector - CSS selector
+     * @returns {NodeList} Elements
+     */
+    queryRootAll(selector) {
+      const root = this.getRoot();
+      return root.querySelectorAll ? root.querySelectorAll(selector) : [];
+    }
+  }
+
+  /**
+   * ChatHeader - Component for chat header with room and name inputs
+   * 
+   * @class ChatHeader
+   * @extends UIComponentBase
+   */
+
+
+  class ChatHeader extends UIComponentBase {
+    constructor(config = {}) {
+      super({
         allowRoomChange: config.allowRoomChange !== false,
         showRoom: config.showRoom !== false,
         baseTopic: config.baseTopic || '',
         currentRoom: config.currentRoom || '',
         primaryUserColor: config.primaryUserColor || 'lightblue',
         ...config
-      };
-      
-      this.attachShadow({ mode: 'open' });
+      });
       
       this.shadowRoot.innerHTML = `
       <style>
@@ -3610,22 +4269,46 @@ var RTChat = (function (exports) {
       
       this._cacheElements();
       this._setupEventListeners();
-      this._initialize();
+    }
+    
+    /**
+     * Initialize the component
+     * @protected
+     */
+    _initialize() {
+      // Set initial room visibility
+      if (this.roomDisplay) {
+        if (this.getConfig('showRoom')) {
+          this.roomDisplay.classList.remove('hidden');
+        } else {
+          this.roomDisplay.classList.add('hidden');
+        }
+      }
+      
+      // Set initial room name
+      if (this.roomName) {
+        this.roomName.value = this.getConfig('currentRoom') || '';
+      }
+      
+      // Set room prefix
+      if (this.roomPrefix) {
+        this.roomPrefix.textContent = this.getConfig('baseTopic') || '';
+      }
     }
     
     _cacheElements() {
-      this.roomDisplay = this.shadowRoot.querySelector('.room-display');
-      this.roomPrefix = this.shadowRoot.getElementById('room-prefix');
-      this.roomName = this.shadowRoot.getElementById('room-name');
-      this.chatRoomBox = this.shadowRoot.getElementById('chat-room-box');
-      this.chatRoom = this.shadowRoot.getElementById('chat-room');
-      this.chatName = this.shadowRoot.getElementById('chat-name');
+      this.roomDisplay = this.queryRoot('.room-display');
+      this.roomPrefix = this.queryRoot('#room-prefix');
+      this.roomName = this.queryRoot('#room-name');
+      this.chatRoomBox = this.queryRoot('#chat-room-box');
+      this.chatRoom = this.queryRoot('#chat-room');
+      this.chatName = this.queryRoot('#chat-name');
     }
     
     _setupEventListeners() {
       // Room name editing
       if (this.roomName) {
-        if (this.config.allowRoomChange) {
+        if (this.getConfig('allowRoomChange')) {
           this.roomName.addEventListener('blur', () => this._onRoomChange());
           this.roomName.addEventListener('keydown', (e) => {
             if (e.key === 'Enter') {
@@ -3685,27 +4368,19 @@ var RTChat = (function (exports) {
     
     _onRoomChange() {
       const newRoom = this.roomName.value.trim();
-      this.dispatchEvent(new CustomEvent('roomchange', {
-        detail: { room: newRoom },
-        bubbles: true,
-        composed: true
-      }));
+      this.dispatchCustomEvent('roomchange', { room: newRoom });
     }
     
     _cancelRoomEdit() {
       // Restore previous value
       if (this.roomName) {
-        this.roomName.value = this.config.currentRoom || '';
+        this.roomName.value = this.getConfig('currentRoom') || '';
       }
     }
     
     _onNameChange() {
       const newName = this.chatName.value.trim();
-      this.dispatchEvent(new CustomEvent('namechange', {
-        detail: { name: newName },
-        bubbles: true,
-        composed: true
-      }));
+      this.dispatchCustomEvent('namechange', { name: newName });
     }
     
     // Public API
@@ -3713,7 +4388,7 @@ var RTChat = (function (exports) {
       if (this.roomName) {
         this.roomName.value = room;
       }
-      this.config.currentRoom = room;
+      this.setConfig('currentRoom', room);
     }
     
     setName(name) {
@@ -3726,12 +4401,13 @@ var RTChat = (function (exports) {
       if (this.roomPrefix) {
         this.roomPrefix.textContent = prefix;
       }
-      this.config.baseTopic = prefix;
+      this.setConfig('baseTopic', prefix);
     }
     
     setCollapsible(collapsible) {
-      if (this.shadowRoot.querySelector('.chat-header')) {
-        this.shadowRoot.querySelector('.chat-header').style.cursor = collapsible ? 'pointer' : 'default';
+      const header = this.queryRoot('.chat-header');
+      if (header) {
+        header.style.cursor = collapsible ? 'pointer' : 'default';
       }
     }
   }
@@ -3739,21 +4415,109 @@ var RTChat = (function (exports) {
   customElements.define('chat-header', ChatHeader);
 
   /**
+   * ActiveUsersListHTMLElementBase - HTMLElement-based base for active users list
+   * 
+   * This class extends UIComponentBase (which extends HTMLElement) and implements
+   * the ActiveUsersListBase contract. This allows concrete implementations to
+   * extend this class and get both HTMLElement functionality and the abstract contract.
+   * 
+   * @extends UIComponentBase
+   * @implements ActiveUsersListBase
+   */
+
+
+  class ActiveUsersListHTMLElementBase extends UIComponentBase {
+    /**
+     * Create a new ActiveUsersListHTMLElementBase instance
+     * @param {Object} config - Configuration options
+     */
+    constructor(config = {}) {
+      super(config);
+      
+      // Initialize abstract base functionality
+      // Initialize properties from ActiveUsersListBase
+      this.userColorMap = new Map(); // Map<user, color>
+    }
+
+    /**
+     * Update the list of active users
+     * Must be implemented by subclasses
+     * @param {Array<string>} users - List of active user names
+     * @param {Function} getUserColor - Optional function to get color for a user
+     * @abstract
+     */
+    updateUsers(users, getUserColor = null) {
+      throw new Error('updateUsers must be implemented by subclass');
+    }
+
+    /**
+     * Get color for a user (for consistency)
+     * Default implementation from ActiveUsersListBase
+     * @param {string} user - User name
+     * @returns {string} Color
+     */
+    getUserColor(user) {
+      if (!this.userColorMap) {
+        this.userColorMap = new Map();
+      }
+      if (!this.userColorMap.has(user)) {
+        const index = this.userColorMap.size;
+        const userColors = this.getConfig('userColors') || [];
+        const color = userColors[index % userColors.length];
+        this.userColorMap.set(user, color);
+      }
+      return this.userColorMap.get(user);
+    }
+
+    /**
+     * Set user color explicitly
+     * @param {string} user - User name
+     * @param {string} color - Color
+     */
+    setUserColor(user, color) {
+      if (!this.userColorMap) {
+        this.userColorMap = new Map();
+      }
+      this.userColorMap.set(user, color);
+    }
+
+    /**
+     * Clear the user list
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    clear() {
+      throw new Error('clear must be implemented by subclass');
+    }
+
+    /**
+     * Notify that a user was clicked
+     * Default implementation dispatches custom event
+     * @param {string} user - User name
+     * @protected
+     */
+    _onUserClick(user) {
+      this.dispatchCustomEvent('userclick', { user });
+    }
+  }
+
+  /**
    * ActiveUsersList - Component for displaying active users with colored chips
    * 
+   * HTMLElement-based implementation that extends ActiveUsersListHTMLElementBase,
+   * which provides both HTMLElement functionality and ActiveUsersListBase contract.
+   * 
    * @class ActiveUsersList
-   * @extends HTMLElement
+   * @extends ActiveUsersListHTMLElementBase
    */
-  class ActiveUsersList extends HTMLElement {
+
+
+  class ActiveUsersList extends ActiveUsersListHTMLElementBase {
     constructor(config = {}) {
-      super();
-      
-      this.config = {
+      super({
         userColors: config.userColors || ['lightcoral', 'lightseagreen', 'lightsalmon', 'lightgreen'],
         ...config
-      };
-      
-      this.attachShadow({ mode: 'open' });
+      });
       
       this.shadowRoot.innerHTML = `
       <style>
@@ -3793,12 +4557,20 @@ var RTChat = (function (exports) {
       </div>
     `;
       
-      this.activeUsersEl = this.shadowRoot.querySelector('.active-users');
-      this.userColorMap = new Map(); // Map<user, color>
+      this.activeUsersEl = this.queryRoot('.active-users');
+    }
+    
+    /**
+     * Initialize the component
+     * @protected
+     */
+    _initialize() {
+      // Component is ready after shadow DOM is set up
     }
     
     /**
      * Update the list of active users
+     * Implements ActiveUsersListBase.updateUsers
      * @param {Array<string>} users - List of active user names
      * @param {Function} getUserColor - Optional function to get color for a user
      */
@@ -3829,7 +4601,8 @@ var RTChat = (function (exports) {
         } else {
           // Use index-based color assignment
           const index = users.indexOf(user);
-          userColor = this.config.userColors[index % this.config.userColors.length];
+          const userColors = this.getConfig('userColors') || [];
+          userColor = userColors[index % userColors.length];
         }
         
         bubble.style.backgroundColor = userColor;
@@ -3837,33 +4610,19 @@ var RTChat = (function (exports) {
         bubble.title = user;
         
         bubble.addEventListener('click', () => {
-          this.dispatchEvent(new CustomEvent('userclick', {
-            detail: { user },
-            bubbles: true,
-            composed: true
-          }));
+          // Call base class method which dispatches event
+          this._onUserClick(user);
         });
         
         this.activeUsersEl.appendChild(bubble);
       });
     }
     
-    /**
-     * Get color for a user (for consistency)
-     * @param {string} user - User name
-     * @returns {string} Color
-     */
-    getUserColor(user) {
-      if (!this.userColorMap.has(user)) {
-        const index = this.userColorMap.size;
-        const color = this.config.userColors[index % this.config.userColors.length];
-        this.userColorMap.set(user, color);
-      }
-      return this.userColorMap.get(user);
-    }
+    // getUserColor is inherited from ActiveUsersListHTMLElementBase
     
     /**
      * Clear the user list
+     * Implements ActiveUsersListBase.clear
      */
     clear() {
       if (this.activeUsersEl) {
@@ -3887,19 +4646,17 @@ var RTChat = (function (exports) {
    * - Custom message components
    * 
    * @class MessagesComponent
-   * @extends HTMLElement
+   * @extends UIComponentBase
    */
-  class MessagesComponent extends HTMLElement {
+
+
+  class MessagesComponent extends UIComponentBase {
     constructor(config = {}) {
-      super();
-      
-      this.config = {
+      super({
         primaryUserColor: config.primaryUserColor || 'lightblue',
         userColors: config.userColors || ['lightcoral', 'lightseagreen', 'lightsalmon', 'lightgreen'],
         ...config
-      };
-      
-      this.attachShadow({ mode: 'open' });
+      });
       
       this.shadowRoot.innerHTML = `
       <style>
@@ -3936,8 +4693,16 @@ var RTChat = (function (exports) {
       <div class="messages"></div>
     `;
       
-      this.messagesEl = this.shadowRoot.querySelector('.messages');
+      this.messagesEl = this.queryRoot('.messages');
       this.userColorMap = new Map(); // Map<user, color>
+    }
+    
+    /**
+     * Initialize the component
+     * @protected
+     */
+    _initialize() {
+      // Component is ready after shadow DOM is set up
     }
     
     /**
@@ -3967,7 +4732,7 @@ var RTChat = (function (exports) {
       // Check if it's own message or from others
       if (isOwn || sender && sender.includes('( You )')) {
         messageEl.classList.add('own-message');
-        messageEl.style.backgroundColor = this.config.primaryUserColor;
+        messageEl.style.backgroundColor = this.getConfig('primaryUserColor');
       } else {
         messageEl.classList.add('other-message');
         // Get user color
@@ -3998,11 +4763,12 @@ var RTChat = (function (exports) {
      * @returns {string} Color
      */
     getUserColor(user) {
-      if (!user) return this.config.userColors[0];
+      if (!user) return this.getConfig('userColors')[0];
       
       if (!this.userColorMap.has(user)) {
         const index = this.userColorMap.size;
-        const color = this.config.userColors[index % this.config.userColors.length];
+        const userColors = this.getConfig('userColors');
+        const color = userColors[index % userColors.length];
         this.userColorMap.set(user, color);
       }
       return this.userColorMap.get(user);
@@ -4071,18 +4837,16 @@ var RTChat = (function (exports) {
    * Note: Call buttons (Audio/Video/End) are now in the call-management section
    * 
    * @class MessageInput
-   * @extends HTMLElement
+   * @extends UIComponentBase
    */
-  class MessageInput extends HTMLElement {
+
+
+  class MessageInput extends UIComponentBase {
     constructor(config = {}) {
-      super();
-      
-      this.config = {
+      super({
         callModes: config.callModes || 'both', // 'audio' | 'video' | 'both'
         ...config
-      };
-      
-      this.attachShadow({ mode: 'open' });
+      });
       
       this.shadowRoot.innerHTML = `
       <style>
@@ -4133,10 +4897,18 @@ var RTChat = (function (exports) {
     }
     
     _cacheElements() {
-      this.inputContainer = this.shadowRoot.querySelector('.input-container');
-      this.inputMessage = this.shadowRoot.getElementById('input-message');
-      this.emojiButton = this.shadowRoot.getElementById('emoji-button');
-      this.clearButton = this.shadowRoot.getElementById('clear-button');
+      this.inputContainer = this.queryRoot('.input-container');
+      this.inputMessage = this.queryRoot('#input-message');
+      this.emojiButton = this.queryRoot('#emoji-button');
+      this.clearButton = this.queryRoot('#clear-button');
+    }
+    
+    /**
+     * Initialize the component
+     * @protected
+     */
+    _initialize() {
+      // Component is ready after shadow DOM is set up
     }
     
     _setupEventListeners() {
@@ -4154,20 +4926,14 @@ var RTChat = (function (exports) {
       // Emoji button
       if (this.emojiButton) {
         this.emojiButton.addEventListener('click', () => {
-          this.dispatchEvent(new CustomEvent('emojiclick', {
-            bubbles: true,
-            composed: true
-          }));
+          this.dispatchCustomEvent('emojiclick');
         });
       }
       
       // Clear button
       if (this.clearButton) {
         this.clearButton.addEventListener('click', () => {
-          this.dispatchEvent(new CustomEvent('clearclick', {
-            bubbles: true,
-            composed: true
-          }));
+          this.dispatchCustomEvent('clearclick');
         });
       }
       
@@ -4177,11 +4943,7 @@ var RTChat = (function (exports) {
     _onSend() {
       const message = this.inputMessage.value.trim();
       if (message) {
-        this.dispatchEvent(new CustomEvent('sendmessage', {
-          detail: { message },
-          bubbles: true,
-          composed: true
-        }));
+        this.dispatchCustomEvent('sendmessage', { message });
         this.clear();
       }
     }
@@ -4323,16 +5085,16 @@ var RTChat = (function (exports) {
         <chat-header id="chat-header-component"></chat-header>
         <div id="call-management">
           <div id="call-buttons-container">
-            <button id="audio-call-button" class="call-button audio-call" title="Start audio call">Audio</button>
-            <button id="video-call-button" class="call-button video-call" title="Start video call">Video</button>
-            <button id="end-call-button" class="call-button end-call" title="End call">End</button>
+            <button id="audio-call-button" class="call-button audio-call" title="Start audio call">Start Audio Call</button>
+            <button id="video-call-button" class="call-button video-call" title="Start video call">Start Video Call</button>
           </div>
           <div id="call-info-container"></div>
           <div id="call-controls-container">
             <span id="call-controls-label">Call Controls:</span>
-            <button id="call-mute-mic-btn" class="call-control-button" title="Mute/Unmute microphone">Mute Mic</button>
-            <button id="call-mute-speakers-btn" class="call-control-button" title="Mute/Unmute speakers">Mute Speakers</button>
-            <button id="call-video-toggle-btn" class="call-control-button hidden" title="Hide/Show video">Hide Video</button>
+            <button id="call-mute-mic-btn" class="call-control-button" title="Toggle microphone on/off">Mic</button>
+            <button id="call-mute-speakers-btn" class="call-control-button" title="Toggle speakers on/off">Speakers</button>
+            <button id="call-video-toggle-btn" class="call-control-button" title="Toggle camera on/off">Camera</button>
+            <button id="end-call-button" class="call-control-button end-call" title="End call" style="background-color: #f44336; color: white;">End</button>
             <span id="call-metrics"></span>
           </div>
         </div>
@@ -4750,20 +5512,6 @@ var RTChat = (function (exports) {
         background-color: #f8d7da;
         border-left: 3px solid #dc3545;
       }
-      .pinned-audio-call {
-        position: sticky;
-        top: 0;
-        z-index: 100;
-        background-color: #e3f2fd;
-        border-left: 4px solid #2196F3;
-        border-radius: 5px;
-        padding: 8px 12px;
-        margin-bottom: 10px;
-        font-size: 0.9em;
-        color: #1976D2;
-        box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-      }
-      .pinned-audio-call.hidden { display: none; }
       @media only screen and (max-width: 1000px) {
           #chat-container {
             min-width: 50vw !important;
@@ -4864,6 +5612,11 @@ var RTChat = (function (exports) {
       // UI state (minimal - most state is in managers)
       this.activeCallType = null;
       this.outgoingCalls = new Map(); // Track outgoing calls for cancellation
+      this.activeVideoCalls = new Set(); // Track active video calls
+      this.activeAudioCalls = new Set(); // Track active audio calls
+      this.localStreams = new Map(); // Track local streams for mute control
+      this.pendingCalls = new Map(); // Track pending incoming calls
+      this.pinnedAudioCallMessage = null; // Reference to pinned audio call message element
     }
 
     /**
@@ -5293,17 +6046,16 @@ var RTChat = (function (exports) {
       }
       
       // Restore buttons container if it was cleared by incoming call prompt
+      // Note: end call button should always be in call-controls-container, not call-buttons-container
       if (buttonsContainer && buttonsContainer.children.length === 0) {
-        // Recreate the buttons
+        // Recreate the buttons (but NOT the end call button - it belongs in call-controls-container)
         if (this.audioCallButton && !buttonsContainer.contains(this.audioCallButton)) {
           buttonsContainer.appendChild(this.audioCallButton);
         }
         if (this.videoCallButton && !buttonsContainer.contains(this.videoCallButton)) {
           buttonsContainer.appendChild(this.videoCallButton);
         }
-        if (this.endCallButton && !buttonsContainer.contains(this.endCallButton)) {
-          buttonsContainer.appendChild(this.endCallButton);
-        }
+        // End call button should NOT be added here - it belongs in call-controls-container
       }
       
       // Hide all buttons first
@@ -5414,9 +6166,35 @@ var RTChat = (function (exports) {
       // Delegate to CallManager
       this.callManager.endAllCalls();
       
-      // UI cleanup will happen via callended events
+      // Immediately update UI state (don't wait for events)
+      // Get current state after ending calls
+      const activeCalls = this.callManager.getActiveCalls();
+      const hasActiveCalls = activeCalls.video.size > 0 || activeCalls.audio.size > 0;
+      
+      // Reset call type
       this.activeCallType = null;
-      this._updateCallButtonStates(false);
+      
+      // Update button states
+      this._updateCallButtonStates(hasActiveCalls);
+      this._updateCallButtonVisibility();
+      
+      // Hide video container if no active calls
+      if (!hasActiveCalls) {
+        if (this.chatVideo) {
+          this.chatVideo.classList.remove('visible');
+        }
+        if (this.videoDisplay && this.videoDisplay.container) {
+          this.videoDisplay.hide();
+        }
+      }
+      
+      // Update CallManagement UI state immediately
+      if (this.callManagement && typeof this.callManagement._updateFromCallManager === 'function') {
+        this.callManagement._updateFromCallManager();
+      }
+      
+      // Also update call controls visibility
+      this._updateCallControlsVisibility();
     }
 
     /**
@@ -5457,17 +6235,16 @@ var RTChat = (function (exports) {
       }
       
       // Restore buttons container if it was cleared by incoming call prompt
+      // Note: end call button should always be in call-controls-container, not call-buttons-container
       if (buttonsContainer && buttonsContainer.children.length === 0) {
-        // Recreate the buttons
+        // Recreate the buttons (but NOT the end call button - it belongs in call-controls-container)
         if (this.audioCallButton && !buttonsContainer.contains(this.audioCallButton)) {
           buttonsContainer.appendChild(this.audioCallButton);
         }
         if (this.videoCallButton && !buttonsContainer.contains(this.videoCallButton)) {
           buttonsContainer.appendChild(this.videoCallButton);
         }
-        if (this.endCallButton && !buttonsContainer.contains(this.endCallButton)) {
-          buttonsContainer.appendChild(this.endCallButton);
-        }
+        // End call button should NOT be added here - it belongs in call-controls-container
       }
       
       if (isActive && callType) {
@@ -5817,6 +6594,35 @@ var RTChat = (function (exports) {
       this.callManager.on('mutechanged', () => {
         // CallManagement handles this automatically
       });
+      
+      // Listen to speakers mute changes to actually mute/unmute audio elements
+      this.callManager.on('speakersmutechanged', ({muted}) => {
+        this.isSpeakersMuted = muted;
+        
+        // Mute/unmute all remote audio elements (speakers)
+        if (this.audioDisplay && this.audioDisplay.activeStreams) {
+          for (const [peerName, streamData] of Object.entries(this.audioDisplay.activeStreams)) {
+            if (streamData && streamData.container) {
+              const remoteAudio = streamData.container.querySelector('.audio-stream-element[data-type="remote"]');
+              if (remoteAudio) {
+                remoteAudio.muted = muted;
+              }
+            }
+          }
+        }
+        
+        // Also handle video calls which may have audio
+        if (this.videoDisplay && this.videoDisplay.activeStreams) {
+          for (const [peerName, streamData] of Object.entries(this.videoDisplay.activeStreams)) {
+            if (streamData && streamData.container) {
+              const remoteVideo = streamData.container.querySelector('.video-stream-remote');
+              if (remoteVideo) {
+                remoteVideo.muted = muted;
+              }
+            }
+          }
+        }
+      });
     }
     
     finishRoomEdit(room = null) {
@@ -6137,8 +6943,7 @@ var RTChat = (function (exports) {
         if (localStream instanceof MediaStream || remoteStream instanceof MediaStream) {
           this.audioDisplay.setStreams(sender, { localStream, remoteStream });
         }
-        // Update pinned audio call message
-        this._updatePinnedAudioCallMessage();
+        // Audio call info is handled by CallManagement, not messages
       } else {
         // Video call
         if (localStream instanceof MediaStream || remoteStream instanceof MediaStream) {
@@ -6173,6 +6978,8 @@ var RTChat = (function (exports) {
      * @private
      */
     _handleCallEnded(peerName) {
+      console.log("ChatBox._handleCallEnded: Handling call ended for " + peerName);
+      
       // Stop ringing if call ends (including cancelled calls)
       if (this.ringer && typeof this.ringer.stop === 'function') {
         this.ringer.stop();
@@ -6182,14 +6989,23 @@ var RTChat = (function (exports) {
       this.videoDisplay.removeStreams(peerName);
       this.audioDisplay.removeStreams(peerName);
       
-      // Get current state from CallManager
+      // Get current state from CallManager (state is already updated when event fires)
       const activeCalls = this.callManager ? this.callManager.getActiveCalls() : {audio: new Set(), video: new Set()};
+      const pendingCalls = this.callManager ? this.callManager.getPendingCalls() : new Set();
       const hasActiveCalls = activeCalls.video.size > 0 || activeCalls.audio.size > 0;
+      pendingCalls.size > 0;
+      
+      console.log("ChatBox._handleCallEnded: State after call ended - active:", activeCalls, "pending:", pendingCalls);
       
       // Hide video container if no active video calls
-      if (activeCalls.video.size === 0 && this.chatVideo) {
-        this.chatVideo.classList.remove('visible');
-        console.log('Video container hidden');
+      if (activeCalls.video.size === 0) {
+        if (this.chatVideo) {
+          this.chatVideo.classList.remove('visible');
+        }
+        // Also hide the video display container directly
+        if (this.videoDisplay && this.videoDisplay.container) {
+          this.videoDisplay.hide();
+        }
       }
       
       // Update pinned audio call message
@@ -6204,12 +7020,29 @@ var RTChat = (function (exports) {
       // Update button states based on actual call state (will show start buttons if no active calls)
       this._updateCallButtonStates(hasActiveCalls);
       
-      // Update button visibility to restore start call buttons if no active calls
+      // Update button visibility to restore start call buttons if no active calls AND no pending calls
       this._updateCallButtonVisibility();
       
-      // Update CallManagement UI
+      // CRITICAL: Update CallManagement UI - this should hide controls and info containers
+      // Always update state from CallManager to ensure UI is in correct state
       if (this.callManagement && typeof this.callManagement._updateFromCallManager === 'function') {
+        console.log("ChatBox._handleCallEnded: Updating CallManagement UI");
         this.callManagement._updateFromCallManager();
+      }
+      
+      // Ensure call management container is visible so users can start new calls
+      // Even when there are no active calls, the container should be visible for start call buttons
+      if (this.callManagementContainer) {
+        this.callManagementContainer.classList.remove('hidden');
+        this.callManagementContainer.style.display = 'flex';
+      }
+      
+      // Also ensure video container is hidden if no active calls
+      if (!hasActiveCalls && this.chatVideo) {
+        this.chatVideo.classList.remove('visible');
+        if (this.videoDisplay && this.videoDisplay.container) {
+          this.videoDisplay.hide();
+        }
       }
     }
     
@@ -6386,7 +7219,9 @@ var RTChat = (function (exports) {
      * @private
      */
     _updatePinnedAudioCallMessage() {
-      const hasAudioCalls = this.activeAudioCalls.size > 0;
+      // Get active audio calls from CallManager if available, otherwise use local state
+      const activeCalls = this.callManager ? this.callManager.getActiveCalls() : {audio: new Set()};
+      const hasAudioCalls = activeCalls.audio.size > 0;
       
       if (hasAudioCalls) {
         // Create or update pinned message
@@ -6396,7 +7231,7 @@ var RTChat = (function (exports) {
           this.pinnedAudioCallMessage.className = 'pinned-audio-call';
           
           // Insert at the top of messages
-          const messagesEl = this.messages;
+          const messagesEl = this.messagesComponent ? this.messagesComponent.shadowRoot?.querySelector('#messages') || this.messagesComponent : null;
           if (messagesEl && messagesEl.firstChild) {
             messagesEl.insertBefore(this.pinnedAudioCallMessage, messagesEl.firstChild);
           } else if (messagesEl) {
@@ -6405,8 +7240,8 @@ var RTChat = (function (exports) {
         }
         
         // Update message content with list of active audio calls
-        const callList = Array.from(this.activeAudioCalls).join(', ');
-        const callCount = this.activeAudioCalls.size;
+        const callList = Array.from(activeCalls.audio).join(', ');
+        const callCount = activeCalls.audio.size;
         this.pinnedAudioCallMessage.textContent = `🔊 Audio call active${callCount > 1 ? 's' : ''} with: ${callList}`;
         this.pinnedAudioCallMessage.classList.remove('hidden');
       } else {
@@ -6421,6 +7256,7 @@ var RTChat = (function (exports) {
         }
       }
     }
+
 
     onCallConnected(sender, {localStream, remoteStream}) {
       // Stop ringing when call connects
@@ -6485,8 +7321,7 @@ var RTChat = (function (exports) {
         if (localStream instanceof MediaStream) {
           this.localStreams.set(sender, localStream);
         }
-        // Update pinned audio call message
-        this._updatePinnedAudioCallMessage();
+        // Audio call info is handled by CallManagement, not messages
         // Show call controls
         this._updateCallControlsVisibility();
       } else {
@@ -7289,13 +8124,66 @@ var RTChat = (function (exports) {
         }
       }
       
-      existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+      // Retry loop to handle race conditions when multiple tabs initialize simultaneously
+      const maxRetries = 10;
+      let retryCount = 0;
+      let nextTabID = null;
       
-      const maxTabID = existingTabs.length ? (Math.max(...existingTabs)) : -1;
-      const minTabID = existingTabs.length ? (Math.min(...existingTabs)) : -1;
-      this.tabID = (minTabID < 10) ? (maxTabID + 1) : 0;
-      existingTabs.push(this.tabID);
-      this.storage.setItem('tabs', JSON.stringify(existingTabs));
+      while (retryCount < maxRetries && nextTabID === null) {
+        // Re-read tabs list to get the most current state
+        existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+        
+        // Find the next available tab ID
+        // First, try to find a gap (reuse IDs from closed tabs)
+        let candidateID = 0;
+        if (existingTabs.length > 0) {
+          const sortedTabs = [...existingTabs].sort((a, b) => a - b);
+          // Look for first gap starting from 0
+          for (let i = 0; i < sortedTabs.length; i++) {
+            if (sortedTabs[i] !== i) {
+              candidateID = i;
+              break;
+            }
+            candidateID = i + 1;
+          }
+        }
+        
+        // Verify the candidate ID is not already taken (re-read to check for race condition)
+        const currentTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+        if (!currentTabs.includes(candidateID)) {
+          // ID is available, claim it
+          currentTabs.push(candidateID);
+          this.storage.setItem('tabs', JSON.stringify(currentTabs));
+          
+          // Verify we successfully claimed it (check for race condition where another tab also added it)
+          const verifyTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+          const count = verifyTabs.filter(id => id === candidateID).length;
+          if (count === 1) {
+            // Successfully claimed unique ID
+            nextTabID = candidateID;
+          } else {
+            // Another tab also claimed this ID, remove our claim and retry
+            const cleanedTabs = verifyTabs.filter(id => id !== candidateID);
+            this.storage.setItem('tabs', JSON.stringify(cleanedTabs));
+            retryCount++;
+            if (this.config.debug && retryCount < maxRetries) {
+              console.log(`Tab ID conflict detected after claim, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+            }
+          }
+        } else {
+          // ID was taken by another tab, retry
+          retryCount++;
+          if (this.config.debug && retryCount < maxRetries) {
+            console.log(`Tab ID conflict detected, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+          }
+        }
+      }
+      
+      if (nextTabID === null) {
+        throw new Error(`Failed to acquire unique tab ID after ${maxRetries} attempts`);
+      }
+      
+      this.tabID = nextTabID;
       
       // Start polling to keep tab alive
       this.storage.setItem("tabpoll_" + this.tabID, Date.now().toString());
@@ -7992,7 +8880,21 @@ var RTChat = (function (exports) {
     endCallWithUser(user){
       console.log("Ending call with " + user);
       if (this.rtcConnections[user]){
-          this.rtcConnections[user].endCall();
+          try {
+              this.rtcConnections[user].endCall();
+              console.log("Sent endcall message to " + user + " via RTC data channel");
+          } catch (err) {
+              console.warn("Failed to send endcall via RTC channel, trying MQTT fallback:", err);
+              // Fallback: send via MQTT if RTC channel fails
+              try {
+                  this.sendOverRTC("endcall", null, user);
+                  console.log("Sent endcall message to " + user + " via MQTT fallback");
+              } catch (mqttErr) {
+                  console.error("Failed to send endcall message to " + user + " via both RTC and MQTT:", mqttErr);
+              }
+          }
+      } else {
+          console.warn("No RTC connection found for " + user + ", cannot send endcall message");
       }
     }
     callFromUser(user, callInfo, initiatedCall, promises){
@@ -8014,9 +8916,10 @@ var RTChat = (function (exports) {
       }
     }
     oncallended(user){
-      console.log("Call ended with " + user);
+      console.log("BaseMQTTRTCClient.oncallended: Call ended with " + user);
       // Emit the callended event so UI components can react
       this.emit('callended', user);
+      console.log("BaseMQTTRTCClient.oncallended: Emitted 'callended' event for " + user);
     }
     acceptCallFromUser(user, callInfo, promises){
        return Promise.resolve(true);
@@ -8096,8 +8999,8 @@ var RTChat = (function (exports) {
     }
 
     changeName(newName){
-      this.name;
-      const tabID = this.tabManager ? this.tabManager.getTabID() : (typeof tabID !== 'undefined' ? tabID : null);
+      let oldName = this.name;
+      const tabID = this.tabManager ? this.tabManager.getTabID() : null;
       this.name = newName + (tabID ? ('(' + tabID + ')') : '');
       
       // Use storage adapter if available, otherwise use localStorage
@@ -8108,7 +9011,7 @@ var RTChat = (function (exports) {
         localStorage.setItem("name", newName);
       }
       
-      this.postPubliclyToMQTTServer("nameChange", {oldName: this.name, newName});
+      this.postPubliclyToMQTTServer("nameChange", {oldName: oldName, newName: this.name});
     }
     recordNameChange(oldName, newName){
       this.knownUsers[newName] = this.knownUsers[oldName];
@@ -8234,6 +9137,7 @@ var RTChat = (function (exports) {
       }
       registerDataChannel(dataChannel){
           dataChannel.onmessage = ((e) => {
+              console.log("RTCConnection.registerDataChannel: Received message on channel '" + dataChannel.label + "' from " + this.target, e.data);
               this.onmessage(e, dataChannel.label);
           }).bind(this);
           dataChannel.onerror = ((e) => {
@@ -8241,6 +9145,7 @@ var RTChat = (function (exports) {
               this.ondatachannelerror(e, dataChannel.label);
           }).bind(this);
           dataChannel.onopen = ((e) => {
+              console.log("RTCConnection.registerDataChannel: Data channel '" + dataChannel.label + "' opened for " + this.target);
               this.dataChannelDeferredPromises[dataChannel.label].resolve(e);
           }).bind(this);
           this.dataChannels[dataChannel.label] = dataChannel;
@@ -8407,7 +9312,13 @@ var RTChat = (function (exports) {
                   }
                   this.streamConnectionPromise.reject(e);
                   this.streamPromise.reject(e);
+                  // Return null to indicate failure, don't throw (which would break the chain)
+                  return null;
               }).then(streamConnection => {
+                  // Only proceed if streamConnection exists (call was not rejected)
+                  if (!streamConnection) {
+                      return;
+                  }
                   streamConnection.setRemoteDescription(new RTCSessionDescription(offer))
                       .then(() => this.streamConnection.createAnswer())
                       .then(answer => this.streamConnection.setLocalDescription(answer))
@@ -8420,6 +9331,9 @@ var RTChat = (function (exports) {
                               this.streamConnection.addIceCandidate(new RTCIceCandidate(this.pendingStreamIceCandidate));
                               this.pendingStreamIceCandidate = null;
                           }
+                      })
+                      .catch(err => {
+                          console.error("Error setting remote description or creating answer:", err);
                       });
               });
 
@@ -8437,20 +9351,44 @@ var RTChat = (function (exports) {
                   }
               }
           }else if (channel === "endcall"){
+              console.log("RTCConnection.onmessage: Received endcall message from " + this.target);
               this._closeCall();
           }else {
               this.mqttClient.onrtcmessage(channel, event.data, this.target);
           }
       }
       endCall(){
-          this.send("endcall", null);
+          console.log("RTCConnection.endCall: Sending endcall message to " + this.target);
+          try {
+              const sendResult = this.send("endcall", null);
+              // send() can return a Promise if channel is not ready
+              if (sendResult && typeof sendResult.then === 'function') {
+                  sendResult
+                      .then(() => {
+                          console.log("RTCConnection.endCall: Successfully sent endcall message to " + this.target);
+                      })
+                      .catch((err) => {
+                          console.error("RTCConnection.endCall: Failed to send endcall message (async):", err);
+                      });
+              } else {
+                  console.log("RTCConnection.endCall: Successfully sent endcall message to " + this.target);
+              }
+          } catch (err) {
+              console.error("RTCConnection.endCall: Failed to send endcall message (sync):", err);
+              // Still close the call even if send failed
+          }
           this._closeCall();
       }
       _closeCall(){
+          console.log("RTCConnection._closeCall: Closing call with " + this.target);
           if (this.streamConnection){
               this.streamConnection.close();
-              this.localStream.getTracks().forEach(track => track.stop());
-              this.remoteStream.getTracks().forEach(track => track.stop());
+              if (this.localStream){
+                  this.localStream.getTracks().forEach(track => track.stop());
+              }
+              if (this.remoteStream){
+                  this.remoteStream.getTracks().forEach(track => track.stop());
+              }
               this.remoteStream = null;
               this.localStream = null;
           }
@@ -8465,7 +9403,12 @@ var RTChat = (function (exports) {
           this.callEndPromise = new DeferredPromise();
           this.callPromises = {start: this.streamPromise.promise, end: this.callEndPromise.promise};
 
-          this.mqttClient.oncallended(this.target);
+          if (this.mqttClient && this.mqttClient.oncallended){
+              console.log("RTCConnection._closeCall: Calling mqttClient.oncallended for " + this.target);
+              this.mqttClient.oncallended(this.target);
+          } else {
+              console.warn("RTCConnection._closeCall: mqttClient.oncallended is not defined!");
+          }
       }
 
       onReceivedIceCandidate(data) {
@@ -8833,8 +9776,18 @@ var RTChat = (function (exports) {
               return super.on(rtcevent, handler);
           }else if (rtcevent === "callended"){
               // Special case: callended sets oncallended
-              this.oncallended = handler.bind(this);
-              // Also register as event listener
+              // Store the original oncallended method that emits the event
+              const originalOnCallEnded = this.oncallended;
+              // Create a wrapper that calls the original (to emit event)
+              // The handler will be called via the event listener registered below
+              this.oncallended = (user) => {
+                  // Call the original method to emit the 'callended' event
+                  // This will trigger all registered event listeners including the handler
+                  if (originalOnCallEnded) {
+                      originalOnCallEnded.call(this, user);
+                  }
+              };
+              // Register handler as event listener so it gets called when event is emitted
               return super.on(rtcevent, handler);
           }else if (rtcevent === "question"){
               // Question handlers are registered via addQuestionHandler
@@ -10008,14 +10961,176 @@ var RTChat = (function (exports) {
   }
 
   /**
+   * VideoChatHTMLElementBase - HTMLElement-based base for video chat component
+   * 
+   * This class extends UIComponentBase (which extends HTMLElement) and implements
+   * the VideoChatBase contract. This allows concrete implementations to
+   * extend this class and get both HTMLElement functionality and the abstract contract.
+   * 
+   * @extends UIComponentBase
+   * @implements VideoChatBase
+   */
+
+
+  class VideoChatHTMLElementBase extends UIComponentBase {
+    /**
+     * Create a new VideoChatHTMLElementBase instance
+     * @param {Object} rtc - RTC client instance
+     * @param {Object} options - Configuration options
+     */
+    constructor(rtc, options = {}) {
+      super(options);
+      
+      // Initialize abstract base functionality
+      // Initialize properties from VideoChatBase
+      this.rtc = rtc;
+      
+      // Store window reference
+      this._window = this.options.window;
+      this._assignToWindow = this.options.assignToWindow;
+      
+      // Note: RTCVideoChat initialization should be done in subclass
+      // after shadow DOM is set up, so callbacks can access DOM elements
+      // Subclasses should call _initializeRTCVideoChat() after setting up DOM
+    }
+    
+    /**
+     * Initialize RTCVideoChat with callbacks
+     * Should be called by subclasses after DOM is set up
+     * @protected
+     */
+    _initializeRTCVideoChat(rtc) {
+      // Bind methods
+      this.setLocalSrc = this.setLocalSrc.bind(this);
+      this.setRemoteSrc = this.setRemoteSrc.bind(this);
+      this.hide = this.hide.bind(this);
+      this.show = this.show.bind(this);
+      this.resize = this.resize.bind(this);
+      
+      // Initialize RTCVideoChat with callbacks
+      this.rtcVC = new RTCVideoChat(rtc,
+        this.setLocalSrc,
+        this.setRemoteSrc,
+        this.hide,
+        this.show
+      );
+      
+      // Optional window assignment
+      if (this._assignToWindow && this._window) {
+        this._window.vc = this;
+      }
+      
+      // Bind RTCVideoChat methods
+      this.call = this.rtcVC.call.bind(this.rtcVC);
+      this.endCall = this.rtcVC.endCall.bind(this.rtcVC);
+      
+      // Add resize listener if window is available
+      if (this._window) {
+        this._window.addEventListener('resize', this.resize);
+      }
+    }
+
+    /**
+     * Set the local video source (MediaStream)
+     * Must be implemented by subclasses
+     * @param {MediaStream|null} src - MediaStream to display, or null to clear
+     * @abstract
+     */
+    setLocalSrc(src) {
+      throw new Error('setLocalSrc must be implemented by subclass');
+    }
+
+    /**
+     * Set the remote video source (MediaStream)
+     * Must be implemented by subclasses
+     * @param {MediaStream|null} src - MediaStream to display, or null to clear
+     * @abstract
+     */
+    setRemoteSrc(src) {
+      throw new Error('setRemoteSrc must be implemented by subclass');
+    }
+
+    /**
+     * Show the video chat UI
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    show() {
+      throw new Error('show must be implemented by subclass');
+    }
+
+    /**
+     * Hide the video chat UI
+     * Must be implemented by subclasses
+     * @abstract
+     */
+    hide() {
+      throw new Error('hide must be implemented by subclass');
+    }
+
+    /**
+     * Handle window resize
+     * Default implementation - can be overridden
+     * @param {Object} window - Window object (optional, uses this._window if not provided)
+     */
+    resize(window = null) {
+      const win = window || this._window;
+      if (!win) return;
+      
+      // Optionally adjust the size based on the window size or other conditions
+      const width = win.innerWidth;
+      const height = win.innerHeight;
+      
+      // Get container element (must be implemented by subclass)
+      const container = this._getContainer();
+      if (container) {
+        // Example: Adjust max-width/max-height based on conditions
+        container.style.maxWidth = width > 600 ? '50vw' : '80vw';
+        container.style.maxHeight = height > 600 ? '50vh' : '80vh';
+      }
+    }
+
+    /**
+     * Get the container element
+     * Must be implemented by subclasses
+     * @returns {HTMLElement|null} Container element
+     * @protected
+     * @abstract
+     */
+    _getContainer() {
+      throw new Error('_getContainer must be implemented by subclass');
+    }
+
+    /**
+     * Cleanup and destroy the component
+     * Default implementation removes resize listener
+     */
+    disconnectedCallback() {
+      super.disconnectedCallback();
+      
+      // Remove resize listener
+      if (this._window && this.resize) {
+        this._window.removeEventListener('resize', this.resize);
+      }
+      
+      // Clean up window assignment
+      if (this._assignToWindow && this._window && this._window.vc === this) {
+        delete this._window.vc;
+      }
+    }
+  }
+
+  /**
    * BasicVideoChat - Web Component UI for displaying video
+   * 
+   * HTMLElement-based implementation that extends VideoChatHTMLElementBase,
+   * which provides both HTMLElement functionality and VideoChatBase contract.
    * 
    * This is a UI component that uses RTCVideoChat (from core) for business logic.
    * It provides a Web Component interface for video calling.
    * 
    * Usage:
    *   import { BasicVideoChat } from './video-chat.js';
-   *   import { RTCVideoChat } from '../core/rtc-video-chat.js';
    *   
    *   const videoChat = new BasicVideoChat(rtcClient, {
    *     window: window,        // Optional: inject window object
@@ -10043,16 +11158,9 @@ var RTChat = (function (exports) {
    */
 
 
-
-  class BasicVideoChat extends HTMLElement {
+  class BasicVideoChat extends VideoChatHTMLElementBase {
       constructor(rtc, options = {}) {
-          super();
-          
-          // Inject window object or use global window
-          this._window = options.window || (typeof window !== 'undefined' ? window : null);
-          this._assignToWindow = options.assignToWindow !== false;
-          
-          this.attachShadow({ mode: 'open' });
+          super(rtc, options);
           this.shadowRoot.innerHTML = `
             <style>
                 #container {
@@ -10093,67 +11201,86 @@ var RTChat = (function (exports) {
                 <video id="localVideo" autoplay playsinline muted></video>
             </div>
         `;
-          this.localVideo = this.shadowRoot.getElementById('localVideo');
-          this.remoteVideo = this.shadowRoot.getElementById('remoteVideo');
-          this.container = this.shadowRoot.getElementById('container');
-          this.setLocalSrc = this.setLocalSrc.bind(this);
-          this.setRemoteSrc = this.setRemoteSrc.bind(this);
-          this.hide = this.hide.bind(this);
-          this.show = this.show.bind(this);
-          this.resize = this.resize.bind(this);
+          this.localVideo = this.queryRoot('#localVideo');
+          this.remoteVideo = this.queryRoot('#remoteVideo');
+          this.container = this.queryRoot('#container');
           
-          // Add resize listener if window is available
-          if (this._window) {
-              this._window.addEventListener('resize', this.resize);
-          }
-          
-          this.rtcVC = new RTCVideoChat(rtc,
-              this.setLocalSrc,
-              this.setRemoteSrc,
-              this.hide,
-              this.show
-          );
-          
-          // Optional window assignment
-          if (this._assignToWindow && this._window) {
-              this._window.vc = this;
-          }
-
-          this.call = this.rtcVC.call.bind(this.rtcVC);
-          this.endCall = this.rtcVC.endCall.bind(this.rtcVC);
-          this.hide = this.rtcVC.hide.bind(this.rtcVC);
-          this.show = this.rtcVC.show.bind(this.rtcVC);
-          return this;
+          // Initialize RTCVideoChat after DOM is set up
+          this._initializeRTCVideoChat(rtc);
       }
+      
+      /**
+       * Initialize the component
+       * @protected
+       */
+      _initialize() {
+          // Component is ready after shadow DOM is set up
+      }
+      
+      /**
+       * Get the container element
+       * Implements VideoChatHTMLElementBase._getContainer
+       * @returns {HTMLElement|null} Container element
+       * @protected
+       */
+      _getContainer() {
+          return this.container;
+      }
+      /**
+       * Set the local video source (MediaStream)
+       * Implements VideoChatBase.setLocalSrc
+       * @param {MediaStream|null} src - MediaStream to display, or null to clear
+       */
       setLocalSrc(src) {
-          this.localVideo.srcObject = src;
-      }
-      setRemoteSrc(src) {
-          this.remoteVideo.srcObject = src;
-      }
-      hide() {
-          this.container.style.display = "none";
-      }
-      show() {
-          this.container.style.display = "flex";
-      }
-      resize() {
-          if (!this._window) return;
-          
-          // Optionally adjust the size based on the window size or other conditions
-          const width = this._window.innerWidth;
-          const height = this._window.innerHeight;
-
-          // Example: Adjust max-width/max-height based on conditions
-          this.container.style.maxWidth = width > 600 ? '50vw' : '80vw';
-          this.container.style.maxHeight = height > 600 ? '50vh' : '80vh';
-      }
-
-      // Don't forget to remove the event listener when the element is disconnected
-      disconnectedCallback() {
-          if (this._window) {
-              this._window.removeEventListener('resize', this.resize);
+          if (this.localVideo) {
+              this.localVideo.srcObject = src;
           }
+      }
+      
+      /**
+       * Set the remote video source (MediaStream)
+       * Implements VideoChatBase.setRemoteSrc
+       * @param {MediaStream|null} src - MediaStream to display, or null to clear
+       */
+      setRemoteSrc(src) {
+          if (this.remoteVideo) {
+              this.remoteVideo.srcObject = src;
+          }
+      }
+      
+      /**
+       * Hide the video chat UI
+       * Implements VideoChatBase.hide
+       */
+      hide() {
+          if (this.container) {
+              this.container.style.display = "none";
+          }
+      }
+      
+      /**
+       * Show the video chat UI
+       * Implements VideoChatBase.show
+       */
+      show() {
+          if (this.container) {
+              this.container.style.display = "flex";
+          }
+      }
+      
+      /**
+       * Handle window resize
+       * Overrides VideoChatHTMLElementBase.resize
+       */
+      resize() {
+          super.resize(this._window);
+      }
+      
+      /**
+       * Cleanup when element is disconnected
+       */
+      disconnectedCallback() {
+          super.disconnectedCallback();
       }
 
   }
