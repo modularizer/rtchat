@@ -13,34 +13,65 @@ export class TabManager {
     this.initialize();
   }
   
+  /**
+   * Helper method to read and deduplicate the tabs array
+   * This ensures we always work with a unique set of tab IDs
+   */
+  _readAndDeduplicateTabs() {
+    const tabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+    // Remove duplicates by converting to Set and back to array
+    const uniqueTabs = [...new Set(tabs)];
+    // If duplicates were found, update storage immediately
+    if (uniqueTabs.length !== tabs.length) {
+      this.storage.setItem('tabs', JSON.stringify(uniqueTabs));
+      if (this.config.debug) {
+        console.log(`Removed ${tabs.length - uniqueTabs.length} duplicate tab ID(s)`);
+      }
+    }
+    return uniqueTabs;
+  }
+  
+  /**
+   * Helper method to clean up stale tabs and return deduplicated active tabs
+   */
+  _cleanupStaleTabs() {
+    let existingTabs = this._readAndDeduplicateTabs();
+    
+    const timeNow = Date.now();
+    const timeout = this.config.tabs.timeout * 1000; // Convert to milliseconds
+    
+    // Clean up stale tabs
+    const activeTabs = [];
+    for (let existingTabID of existingTabs) {
+      const ts = this.storage.getItem("tabpoll_" + existingTabID);
+      if (ts) {
+        const lastUpdateTime = new Date(1 * ts);
+        if ((lastUpdateTime == "Invalid Date") || ((timeNow - lastUpdateTime) > timeout)) {
+          // Tab is stale, remove it
+          this.storage.removeItem("tabpoll_" + existingTabID);
+        } else {
+          // Tab is still active
+          activeTabs.push(existingTabID);
+        }
+      } else {
+        // No poll timestamp, remove it
+        this.storage.removeItem("tabpoll_" + existingTabID);
+      }
+    }
+    
+    // Update storage with only active tabs (already deduplicated)
+    this.storage.setItem('tabs', JSON.stringify(activeTabs));
+    return activeTabs;
+  }
+  
   initialize() {
     if (!this.config.tabs.enabled) {
       this.tabID = null;
       return;
     }
     
-    // Find the id of all the tabs open
-    let existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
-    
-    const timeNow = Date.now();
-    const timeout = this.config.tabs.timeout * 1000; // Convert to milliseconds
-    
-    // Clean up stale tabs
-    for (let existingTabID of existingTabs) {
-      const ts = this.storage.getItem("tabpoll_" + existingTabID);
-      if (ts) {
-        const lastUpdateTime = new Date(1 * ts);
-        if ((lastUpdateTime == "Invalid Date") || ((timeNow - lastUpdateTime) > timeout)) {
-          this.storage.removeItem("tabpoll_" + existingTabID);
-          existingTabs = existingTabs.filter(v => v !== existingTabID);
-          this.storage.setItem('tabs', JSON.stringify(existingTabs));
-        }
-      } else {
-        this.storage.removeItem("tabpoll_" + existingTabID);
-        existingTabs = existingTabs.filter(v => v !== existingTabID);
-        this.storage.setItem('tabs', JSON.stringify(existingTabs));
-      }
-    }
+    // Clean up stale tabs and get deduplicated active tabs
+    this._cleanupStaleTabs();
     
     // Retry loop to handle race conditions when multiple tabs initialize simultaneously
     const maxRetries = 10;
@@ -48,8 +79,8 @@ export class TabManager {
     let nextTabID = null;
     
     while (retryCount < maxRetries && nextTabID === null) {
-      // Re-read tabs list to get the most current state
-      existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+      // Re-read and deduplicate tabs list to get the most current state
+      let existingTabs = this._readAndDeduplicateTabs();
       
       // Find the next available tab ID
       // First, try to find a gap (reuse IDs from closed tabs)
@@ -66,21 +97,25 @@ export class TabManager {
         }
       }
       
-      // Verify the candidate ID is not already taken (re-read to check for race condition)
-      const currentTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+      // Re-read and deduplicate again to check for race condition
+      let currentTabs = this._readAndDeduplicateTabs();
+      
+      // Check if candidate ID is already taken
       if (!currentTabs.includes(candidateID)) {
-        // ID is available, claim it
+        // ID is available, claim it atomically
         currentTabs.push(candidateID);
+        // Sort to maintain order (helps with gap detection)
+        currentTabs.sort((a, b) => a - b);
         this.storage.setItem('tabs', JSON.stringify(currentTabs));
         
-        // Verify we successfully claimed it (check for race condition where another tab also added it)
-        const verifyTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+        // Verify we successfully claimed it uniquely (re-read and deduplicate)
+        const verifyTabs = this._readAndDeduplicateTabs();
         const count = verifyTabs.filter(id => id === candidateID).length;
         if (count === 1) {
           // Successfully claimed unique ID
           nextTabID = candidateID;
         } else {
-          // Another tab also claimed this ID, remove our claim and retry
+          // Another tab also claimed this ID, remove all instances and retry
           const cleanedTabs = verifyTabs.filter(id => id !== candidateID);
           this.storage.setItem('tabs', JSON.stringify(cleanedTabs));
           retryCount++;
@@ -125,11 +160,14 @@ export class TabManager {
     }
     
     if (this.tabID !== null) {
-      let existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+      // Read and deduplicate tabs before removing this tab's ID
+      let existingTabs = this._readAndDeduplicateTabs();
+      // Remove all instances of this tab ID (should only be one, but be safe)
       existingTabs = existingTabs.filter(v => v !== this.tabID);
       this.storage.setItem('tabs', JSON.stringify(existingTabs));
       this.storage.removeItem("tabpoll_" + this.tabID);
     }
   }
 }
+
 

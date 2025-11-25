@@ -160,6 +160,17 @@ class BaseMQTTRTCClient extends EventEmitter {
     this.rtcConnections = {};
     this.knownUsers = {};
     this.pendingIceCandidates = {};
+    this.maxConnectRetries = configObj.webrtc?.maxConnectRetries || 3;
+    this.connectRetryDelay = configObj.webrtc?.connectRetryDelay || 4000;
+    this.connectionMaintenanceInterval = null;
+    this.connectionMaintenanceIntervalMs = configObj.webrtc?.connectionMaintenanceIntervalMs || 5000;
+    this.waitForAnswerTimeout = configObj.webrtc?.waitForAnswerTimeout || 12000;
+    this.connectingUsers = new Set();
+    this._startConnectionMaintenance = this._startConnectionMaintenance.bind(this);
+    this._maintainPeerConnections = this._maintainPeerConnections.bind(this);
+    this._attemptConnection = this._attemptConnection.bind(this);
+    this.maxConnectRetries = configObj.webrtc?.maxConnectRetries || 3;
+    this.connectRetryDelay = configObj.webrtc?.connectRetryDelay || 4000;
 
 
     this.mqttHistory = [];
@@ -222,6 +233,7 @@ class BaseMQTTRTCClient extends EventEmitter {
         // This ensures we announce our presence as soon as we're ready to receive messages
         this.postPubliclyToMQTTServer("connect", this.userInfo);
         this.onConnectedToMQTT();
+        this._startConnectionMaintenance();
         
         // Also set up periodic announcements to catch any missed connections
         // This handles race conditions when two users connect simultaneously
@@ -325,6 +337,10 @@ class BaseMQTTRTCClient extends EventEmitter {
     if (this.announceInterval) {
       clearInterval(this.announceInterval);
       this.announceInterval = null;
+    }
+    if (this.connectionMaintenanceInterval) {
+      clearInterval(this.connectionMaintenanceInterval);
+      this.connectionMaintenanceInterval = null;
     }
     
     // Cleanup MQTT client
@@ -433,7 +449,7 @@ class BaseMQTTRTCClient extends EventEmitter {
         this.knownUsers[payload.sender] = payload.data;
         this.shouldConnectToUser(payload.sender, payload.data).then(r => {
             if (r){
-                this.connectToUser(payload.sender);
+                this._attemptConnection(payload.sender);
             }
         })
     },
@@ -558,19 +574,144 @@ class BaseMQTTRTCClient extends EventEmitter {
   acceptCallFromUser(user, callInfo, promises){
      return Promise.resolve(true);
   }
-  connectToUser(user){
-    if (this.rtcConnections[user]){
-        console.warn("Already connected to " + user);
-        try{
-            this.disconnectFromUser(user);
-        }catch{}
+  connectToUser(user, attempt = 1){
+    const existingConnection = this.rtcConnections[user];
+    if (existingConnection){
+        const pc = existingConnection.peerConnection;
+        const connectionState = pc?.connectionState;
+        const iceState = pc?.iceConnectionState;
+        const connectionAge = Date.now() - (existingConnection.createdAt || 0);
+        const isHealthy =
+            connectionState === "connected" || connectionState === "completed" ||
+            iceState === "connected" || iceState === "completed";
+        const isStillEstablishing =
+            ["new", "connecting"].includes(connectionState) ||
+            ["new", "checking"].includes(iceState);
+        if (isHealthy){
+            console.log("connectToUser: Connection to " + user + " already established");
+            return existingConnection;
+        }
+        if (isStillEstablishing && connectionAge < this.connectRetryDelay * 2){
+            console.log("connectToUser: Connection to " + user + " still establishing (" + connectionState + "/" + iceState + ")");
+            return existingConnection;
+        }
+        console.warn("connectToUser: Connection to " + user + " stuck in " + connectionState + "/" + iceState + ", restarting");
+        this.disconnectFromUser(user);
         delete this.rtcConnections[user];
     }
     if (!this.connectionToUser(user)){
         this.rtcConnections[user] = new RTCConnection(this, user);
         this.rtcConnections[user].sendOffer();
+        this._scheduleConnectionRetry(user, attempt);
         return this.rtcConnections[user];
     }
+  }
+  _attemptConnection(user){
+    if (!user || user === this.name){
+        return;
+    }
+    if (!this._shouldInitiateConnection(user)){
+        return;
+    }
+    if (this.connectingUsers.has(user)){
+        return;
+    }
+    this.connectingUsers.add(user);
+    setTimeout(() => this.connectingUsers.delete(user), 2000);
+    this.connectToUser(user);
+  }
+  _shouldInitiateConnection(peerName){
+    if (!peerName){
+        return false;
+    }
+    // Deterministic tie-breaker: lexicographically smaller name initiates
+    // If names are identical (shouldn't happen), fall back to comparing lengths
+    if (this.name === peerName){
+        return this.name.length <= peerName.length;
+    }
+    return this.name.localeCompare(peerName) < 0;
+  }
+  _startConnectionMaintenance() {
+    if (this.connectionMaintenanceInterval) {
+      clearInterval(this.connectionMaintenanceInterval);
+    }
+    this.connectionMaintenanceInterval = setInterval(this._maintainPeerConnections, this.connectionMaintenanceIntervalMs);
+    this._maintainPeerConnections();
+  }
+  _maintainPeerConnections() {
+    Object.keys(this.knownUsers).forEach((peerName) => {
+      if (!peerName || peerName === this.name) {
+        return;
+      }
+      const connection = this.rtcConnections[peerName];
+      if (!connection) {
+        if (!this._shouldInitiateConnection(peerName)) {
+          return;
+        }
+        this._attemptConnection(peerName);
+        return;
+      }
+      const pc = connection.peerConnection;
+      const connectionState = pc?.connectionState;
+      const iceState = pc?.iceConnectionState;
+      const signalingState = pc?.signalingState;
+      const hasRemoteDescription = !!pc?.remoteDescription;
+      const waitingForAnswer = signalingState === "have-local-offer" && !hasRemoteDescription;
+      const connectionAge = Date.now() - (connection.createdAt || 0);
+      const isHealthy =
+        connectionState === "connected" || connectionState === "completed" ||
+        iceState === "connected" || iceState === "completed";
+      const isStillEstablishing =
+        ["new", "connecting"].includes(connectionState) ||
+        ["new", "checking"].includes(iceState);
+      if (isHealthy) {
+        return;
+      }
+      if ((isStillEstablishing || waitingForAnswer) && connectionAge < this.waitForAnswerTimeout) {
+        return;
+      }
+      if (!this._shouldInitiateConnection(peerName)) {
+        return;
+      }
+      console.warn(`Connection maintenance: ${peerName} stuck in ${connectionState}/${iceState}, attempting reconnection`);
+      this.disconnectFromUser(peerName);
+      delete this.rtcConnections[peerName];
+      this._attemptConnection(peerName);
+    });
+  }
+  _scheduleConnectionRetry(user, attempt){
+    if (attempt >= this.maxConnectRetries){
+        return;
+    }
+    setTimeout(() => {
+        const connection = this.rtcConnections[user];
+        if (!connection){
+            return;
+        }
+        const pc = connection.peerConnection;
+        if (!pc){
+            return;
+        }
+        const connectionState = pc.connectionState;
+        const iceState = pc.iceConnectionState;
+        const signalingState = pc.signalingState;
+        const hasRemoteDescription = !!pc.remoteDescription;
+        const waitingForAnswer = signalingState === "have-local-offer" && !hasRemoteDescription;
+        const connectionAge = Date.now() - (connection.createdAt || 0);
+        if (connectionState === "connected" || connectionState === "completed" ||
+            iceState === "connected" || iceState === "completed"){
+            return;
+        }
+        if ((waitingForAnswer || connectionState === "new" || iceState === "new") &&
+            connectionAge < this.waitForAnswerTimeout){
+            console.log(`Connection to ${user} still negotiating (${connectionState}/${iceState}, signaling ${signalingState}). Waiting before retry...`);
+            this._scheduleConnectionRetry(user, attempt);
+            return;
+        }
+        console.warn(`Connection to ${user} still in '${connectionState}/${iceState}' after attempt ${attempt}. Retrying...`);
+        this.disconnectFromUser(user);
+        this.connectToUser(user, attempt + 1);
+    }, this.connectRetryDelay);
   }
   connectionToUser(user){
     let existingConnection = this.rtcConnections[user];
@@ -731,6 +872,7 @@ class RTCConnection {
         this.mqttClient = mqttClient;
         this.dataChannels = {};
         this.createdAt = Date.now(); // Track when connection was created
+        this.pendingIceCandidates = []; // Store pending ICE candidates for this connection
         this.peerConnection = new RTCPeerConnection(this.rtcConfiguration);
         this.peerConnection.onicecandidate = this.onicecandidate.bind(this);
 
@@ -759,6 +901,7 @@ class RTCConnection {
         }).bind(this);
 
         this.pendingStreamIceCandidate = null;
+        this.pendingStreamIceCandidates = []; // Array to store multiple pending ICE candidates
         this.streamConnection = null;
         this.remoteStream = null;
         this.localStream = null;
@@ -816,8 +959,8 @@ class RTCConnection {
     }
     _makeStreamConnection(stream){
         if (this.streamConnection){
-            console.warn("Already have a stream connection");
-            return;
+            console.warn("Already have a stream connection, reusing existing instance");
+            return this.streamConnection;
         }
         this.localStream = stream
         this.streamConnection = new RTCPeerConnection(this.rtcConfiguration);
@@ -873,7 +1016,23 @@ class RTCConnection {
             }
             return;
         }
-        this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+        this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
+            .then(() => {
+                // Apply all pending ICE candidates now that remote description is set
+                if (this.pendingIceCandidates && this.pendingIceCandidates.length > 0) {
+                    console.log(`Applying ${this.pendingIceCandidates.length} pending ICE candidates for ${this.target}`);
+                    this.pendingIceCandidates.forEach(candidate => {
+                        this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+                            .catch(err => {
+                                console.warn('Error adding pending ICE candidate:', err);
+                            });
+                    });
+                    this.pendingIceCandidates = [];
+                }
+            })
+            .catch(err => {
+                console.error('Error setting remote description:', err);
+            });
         // Wait for all data channels to be ready before notifying connection
         this.loadPromise.then((() => {
             this.send("connectedViaRTC", null);
@@ -960,10 +1119,12 @@ class RTCConnection {
                         // Send answer via MQTT
                         console.log("Sending stream answer", this.streamConnection.localDescription);
                         this.send("streamanswer", JSON.stringify({"answer": this.streamConnection.localDescription}));
-                        if (this.pendingStreamIceCandidate){
-                            console.log("Found pending stream ice candidate");
-                            this.streamConnection.addIceCandidate(new RTCIceCandidate(this.pendingStreamIceCandidate));
-                            this.pendingStreamIceCandidate = null;
+                        
+                        // Apply pending ICE candidates after setting local description
+                        // Note: We still need remote description to be set, so these will be applied
+                        // when the remote description is set in the streamanswer handler
+                        if (this.pendingStreamIceCandidate || (this.pendingStreamIceCandidates && this.pendingStreamIceCandidates.length > 0)) {
+                            console.log("Found pending stream ice candidates, will apply when remote description is set");
                         }
                     })
                     .catch(err => {
@@ -974,14 +1135,73 @@ class RTCConnection {
         }else if (channel === "streamanswer"){
             console.log("received stream answer", event.data)
             let {answer} = JSON.parse(event.data);
-            this.streamConnection.setRemoteDescription(new RTCSessionDescription(answer));
+            this.streamConnection.setRemoteDescription(new RTCSessionDescription(answer))
+                .then(() => {
+                    // Apply all pending ICE candidates now that remote description is set
+                    if (this.pendingStreamIceCandidates && this.pendingStreamIceCandidates.length > 0) {
+                        console.log(`Applying ${this.pendingStreamIceCandidates.length} pending ICE candidates`);
+                        this.pendingStreamIceCandidates.forEach(candidate => {
+                            try {
+                                this.streamConnection.addIceCandidate(new RTCIceCandidate(candidate))
+                                    .catch(err => {
+                                        console.warn('Error adding pending ICE candidate:', err);
+                                    });
+                            } catch (err) {
+                                console.warn('Error creating ICE candidate:', err);
+                            }
+                        });
+                        this.pendingStreamIceCandidates = [];
+                    }
+                    // Also handle single pending candidate for backward compatibility
+                    if (this.pendingStreamIceCandidate) {
+                        try {
+                            this.streamConnection.addIceCandidate(new RTCIceCandidate(this.pendingStreamIceCandidate))
+                                .catch(err => {
+                                    console.warn('Error adding pending ICE candidate:', err);
+                                });
+                            this.pendingStreamIceCandidate = null;
+                        } catch (err) {
+                            console.warn('Error creating ICE candidate:', err);
+                        }
+                    }
+                })
+                .catch(err => {
+                    console.error('Error setting remote description:', err);
+                });
         }else if (channel === "streamice"){
             console.log("received stream ice", event.data)
             if (event.data){
+                const candidateData = JSON.parse(event.data);
                 if (this.streamConnection){
-                    this.streamConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(event.data)));
+                    // Check if remote description is set before adding ICE candidate
+                    if (this.streamConnection.remoteDescription) {
+                        // Remote description is set, safe to add ICE candidate
+                        this.streamConnection.addIceCandidate(new RTCIceCandidate(candidateData))
+                            .catch(err => {
+                                // If it fails, store it as pending (might be a duplicate or invalid)
+                                console.warn('Error adding ICE candidate, storing as pending:', err);
+                                if (!this.pendingStreamIceCandidates) {
+                                    this.pendingStreamIceCandidates = [];
+                                }
+                                this.pendingStreamIceCandidates.push(candidateData);
+                            });
+                    } else {
+                        // Remote description not set yet, store as pending
+                        console.log('Remote description not set yet, storing ICE candidate as pending');
+                        if (!this.pendingStreamIceCandidates) {
+                            this.pendingStreamIceCandidates = [];
+                        }
+                        this.pendingStreamIceCandidates.push(candidateData);
+                        // Also set single pending for backward compatibility
+                        this.pendingStreamIceCandidate = candidateData;
+                    }
                 }else{
-                    this.pendingStreamIceCandidate = JSON.parse(event.data);
+                    // Stream connection doesn't exist yet, store as pending
+                    this.pendingStreamIceCandidate = candidateData;
+                    if (!this.pendingStreamIceCandidates) {
+                        this.pendingStreamIceCandidates = [];
+                    }
+                    this.pendingStreamIceCandidates.push(candidateData);
                 }
             }
         }else if (channel === "endcall"){
@@ -1046,7 +1266,22 @@ class RTCConnection {
     }
 
     onReceivedIceCandidate(data) {
-        this.peerConnection.addIceCandidate(new RTCIceCandidate(data));
+        // Check if remote description is set before adding ICE candidate
+        if (this.peerConnection.remoteDescription) {
+            this.peerConnection.addIceCandidate(new RTCIceCandidate(data))
+                .catch(err => {
+                    // ICE candidate might be invalid or duplicate, log but don't throw
+                    console.warn('Error adding ICE candidate to peer connection:', err);
+                });
+        } else {
+            // Remote description not set yet, store as pending
+            // The pending ICE candidate will be applied when the answer is received
+            if (!this.pendingIceCandidates) {
+                this.pendingIceCandidates = [];
+            }
+            this.pendingIceCandidates.push(data);
+            console.log('Remote description not set, storing ICE candidate as pending');
+        }
     }
 
     onicecandidate(event){

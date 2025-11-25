@@ -70,6 +70,7 @@ class ChatManager extends EventEmitter {
     // Setup RTC client event listeners if available
     if (rtcClient) {
       this._setupRTCEventListeners();
+      this._hydrateActiveUsersFromClient();
     }
   }
 
@@ -85,9 +86,7 @@ class ChatManager extends EventEmitter {
       // For SignedMQTTRTCClient, we should wait for validation before adding users
       // For regular MQTTRTCClient, we can add users immediately on connectedtopeer
       // Detection: check if validatedPeers property exists (more reliable than constructor.name)
-      const isSignedClient = this.rtcClient && 
-                            (this.rtcClient.validatedPeers !== undefined || 
-                             (this.rtcClient.on && typeof this.rtcClient.on === 'function'));
+      const isSignedClient = this.rtcClient && Array.isArray(this.rtcClient.validatedPeers);
       
       // Also check if validation event is available by trying to listen
       // For now, we'll listen to both events and handle appropriately
@@ -119,6 +118,44 @@ class ChatManager extends EventEmitter {
       });
       
       this.rtcClient.on('disconnectedfrompeer', this._handleUserDisconnected);
+    }
+  }
+
+  /**
+   * Ensure previously validated/connected peers are reflected in activeUsers.
+   * Without this, users validated before ChatManager initializes would never appear active.
+   * @private
+   */
+  _hydrateActiveUsersFromClient() {
+    if (!this.rtcClient) {
+      return;
+    }
+    
+    // Signed clients expose validatedPeers
+    if (Array.isArray(this.rtcClient.validatedPeers)) {
+      this.rtcClient.validatedPeers.forEach((peerName) => {
+        if (peerName && !this.activeUsers.includes(peerName)) {
+          console.log('ChatManager: Hydrating validated peer', peerName);
+          this._handleUserConnected(peerName);
+        }
+      });
+    } else {
+      // Fallback for non-signed clients
+      let connected = null;
+      if (typeof this.rtcClient.connectedUsers === 'function') {
+        connected = this.rtcClient.connectedUsers();
+      } else if (Array.isArray(this.rtcClient.connectedUsers)) {
+        connected = this.rtcClient.connectedUsers;
+      }
+      
+      if (Array.isArray(connected) && connected.length) {
+        connected.forEach((peerName) => {
+          if (peerName && !this.activeUsers.includes(peerName)) {
+            console.log('ChatManager: Hydrating connected peer', peerName);
+            this._handleUserConnected(peerName);
+          }
+        });
+      }
     }
   }
 

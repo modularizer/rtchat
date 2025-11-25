@@ -1118,43 +1118,37 @@ class ChatBox extends HTMLElement {
       this.videoCallButton.style.display = '';
     }
     
+    // Always show simple button text (group calls happen automatically when 2+ users)
+    if (this.audioCallButton) {
+      this.audioCallButton.textContent = 'Start Audio Call';
+    }
+    if (this.videoCallButton) {
+      this.videoCallButton.textContent = 'Start Video Call';
+    }
+    
     // Only show start call buttons if there are users AND no active calls AND no pending calls
     if (hasUsers && !hasActiveCalls && !hasPendingCalls) {
       if (modes === 'both') {
         if (this.audioCallButton) {
           this.audioCallButton.classList.add('visible');
-          // Verify after adding class
-          setTimeout(() => {
-            const computed = window.getComputedStyle(this.audioCallButton);
-            console.log('Audio button after visible class:', {
-              hasVisibleClass: this.audioCallButton.classList.contains('visible'),
-              computedDisplay: computed.display,
-              parentVisible: this.audioCallButton.parentElement ? window.getComputedStyle(this.audioCallButton.parentElement).display : 'N/A',
-              callManagementVisible: this.callManagementContainer ? !this.callManagementContainer.classList.contains('hidden') : false,
-              callManagementDisplay: this.callManagementContainer ? window.getComputedStyle(this.callManagementContainer).display : 'N/A'
-            });
-          }, 0);
         }
         if (this.videoCallButton) {
           this.videoCallButton.classList.add('visible');
-          console.log('Added visible class to video button');
         }
       } else if (modes === 'audio') {
         if (this.audioCallButton) {
           this.audioCallButton.classList.add('visible');
-          console.log('Added visible class to audio button');
         }
       } else if (modes === 'video') {
         if (this.videoCallButton) {
           this.videoCallButton.classList.add('visible');
-          console.log('Added visible class to video button');
         }
       }
     }
   }
 
   /**
-   * Start a call (audio or video)
+   * Start a call (audio or video) - automatically uses group calls when 3+ people
    * @param {string} type - 'audio' or 'video'
    * @private
    */
@@ -1175,30 +1169,60 @@ class ChatBox extends HTMLElement {
     }
 
     // Stop any ongoing ringing (in case we're calling while receiving)
-    this.ringer.stop();
+    if (this.ringer && typeof this.ringer.stop === 'function') {
+      this.ringer.stop();
+    }
 
-    // For now, call the first active user (could be enhanced to select user)
-    const targetUser = activeUsers[0];
-    console.log('Starting call to:', targetUser, 'type:', type);
-    
     // Track which button was clicked
     this.activeCallType = type;
     
-    // Update button states to show cancel button
-    this._updateCallButtonStates(true, type, true); // true = isOutgoing
+    // If there are 2+ other users, always use group call
+    // (1 other user = individual call, 2+ other users = group call)
+    const useGroupCall = activeUsers.length >= 2;
     
-    // Use CallManager to start the call
-    // CallManager will handle timeouts, stream management, and emit events
-    this.callManager.startCall(targetUser, type)
-      .then((result) => {
-        console.log('Call started successfully:', result);
-        // CallManager will handle the rest via events (callconnected, etc.)
-      })
-      .catch((err) => {
-        console.error('Error starting call:', err);
-        this.activeCallType = null;
-        this._updateCallButtonStates(false);
-      });
+    if (useGroupCall) {
+      // Group call with all active users
+      console.log(`Starting group ${type} call with ${activeUsers.length} users:`, activeUsers);
+      
+      // Update button states to show cancel button
+      this._updateCallButtonStates(true, type, true); // true = isOutgoing
+      
+      // Use CallManager to start the group call
+      this.callManager.startGroupCall('all', type)
+        .then((result) => {
+          console.log('Group call started successfully:', result);
+          console.log(`Successfully called ${result.successful.length} users, ${result.failed.length} failed`);
+          if (result.failed.length > 0) {
+            console.warn('Some calls failed:', result.failed);
+          }
+          // CallManager will handle the rest via events (callconnected, etc.)
+        })
+        .catch((err) => {
+          console.error('Error starting group call:', err);
+          this.activeCallType = null;
+          alert(`Failed to start group call: ${err.message || err}`);
+        });
+    } else {
+      // Individual call with first active user
+      const targetUser = activeUsers[0];
+      console.log('Starting individual call to:', targetUser, 'type:', type);
+      
+      // Update button states to show cancel button
+      this._updateCallButtonStates(true, type, true); // true = isOutgoing
+      
+      // Use CallManager to start the call
+      // CallManager will handle timeouts, stream management, and emit events
+      this.callManager.startCall(targetUser, type)
+        .then((result) => {
+          console.log('Call started successfully:', result);
+          // CallManager will handle the rest via events (callconnected, etc.)
+        })
+        .catch((err) => {
+          console.error('Error starting call:', err);
+          this.activeCallType = null;
+          this._updateCallButtonStates(false);
+        });
+    }
   }
 
   /**
@@ -1561,21 +1585,24 @@ class ChatBox extends HTMLElement {
       this.chatHeaderComponent.setRoomPrefix(prefix);
     }
     
-    // Initialize managers with RTC client (using config and this as UI interface)
-    this.callManager = new CallManager(rtc, { 
-      callTimeout: this.config.callTimeout,
-      callUI: this, // ChatBox implements CallUIInterface
-      videoDisplay: this.videoDisplay, // VideoStreamDisplay implements StreamDisplayInterface
-      audioDisplay: this.audioDisplay, // AudioStreamDisplay implements StreamDisplayInterface
-      ringer: this.ringer, // CallRinger implements RingerInterface
-      notifications: this.notificationSound // NotificationSound implements NotificationInterface
-    });
+    // Initialize ChatManager first (needed by CallManager)
     this.chatManager = new ChatManager(rtc, {
       name: this.name,
       primaryUserColor: this.config.primaryUserColor,
       userColors: [...this.config.userColors],
       chatUI: this, // ChatBox implements ChatUIInterface
       notifications: this.notificationSound // NotificationSound implements NotificationInterface
+    });
+    
+    // Initialize CallManager with chatManager reference for group calls
+    this.callManager = new CallManager(rtc, { 
+      callTimeout: this.config.callTimeout,
+      callUI: this, // ChatBox implements CallUIInterface
+      videoDisplay: this.videoDisplay, // VideoStreamDisplay implements StreamDisplayInterface
+      audioDisplay: this.audioDisplay, // AudioStreamDisplay implements StreamDisplayInterface
+      ringer: this.ringer, // CallRinger implements RingerInterface
+      notifications: this.notificationSound, // NotificationSound implements NotificationInterface
+      chatManager: this.chatManager // Pass chatManager for getting active users
     });
     
     // Initialize CallManagement with CallManager
