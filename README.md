@@ -82,7 +82,7 @@ client.on('chat', (message, sender) => {
 
 ### CDN / HTML (Legacy)
 ```html
-<script src="https://modularizer.github.io/rtchat/rtchat.js?add"></script>
+<script src="https://modularizer.github.io/rtchat/bundles/rtchat.min.js?add"></script>
 ```
 
 ### Developer Quick Start (to use the barebones chat system in your own project)
