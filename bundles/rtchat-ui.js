@@ -5612,7 +5612,9 @@ var RTChatUI = (function (exports) {
     }
   }
 
-  customElements.define('chat-header', ChatHeader);
+  if (!customElements.get('chat-header')) {
+    customElements.define('chat-header', ChatHeader);
+  }
 
   /**
    * ActiveUsersListBase - Abstract base class for active users list components
@@ -5922,7 +5924,9 @@ var RTChatUI = (function (exports) {
     }
   }
 
-  customElements.define('active-users-list', ActiveUsersList);
+  if (!customElements.get('active-users-list')) {
+    customElements.define('active-users-list', ActiveUsersList);
+  }
 
   /**
    * MessagesComponent - Component for displaying chat messages
@@ -6110,7 +6114,9 @@ var RTChatUI = (function (exports) {
     }
   }
 
-  customElements.define('messages-component', MessagesComponent);
+  if (!customElements.get('messages-component')) {
+    customElements.define('messages-component', MessagesComponent);
+  }
 
   /**
    * MessageInput - Component for message input and controls
@@ -6278,7 +6284,9 @@ var RTChatUI = (function (exports) {
     // Call buttons are now in the call-management section, not in MessageInput
   }
 
-  customElements.define('message-input', MessageInput);
+  if (!customElements.get('message-input')) {
+    customElements.define('message-input', MessageInput);
+  }
 
   /**
    * ChatBox - A Web Component for displaying and managing chat messages
@@ -8706,7 +8714,9 @@ var RTChatUI = (function (exports) {
 
 
   }
-  customElements.define('chat-box', ChatBox);
+  if (!customElements.get('chat-box')) {
+    customElements.define('chat-box', ChatBox);
+  }
 
   /**
    * VideoChatBase - Abstract base class for video chat components
@@ -9309,7 +9319,9 @@ var RTChatUI = (function (exports) {
 
   }
 
-  customElements.define('video-chat', BasicVideoChat);
+  if (!customElements.get('video-chat')) {
+    customElements.define('video-chat', BasicVideoChat);
+  }
 
   /**
    * Default Configuration Values for RTChat
@@ -13825,7 +13837,9 @@ var RTChatUI = (function (exports) {
   // Store pending configs in an array - we'll match them to elements in connectedCallback
   const autoConfigPending = [];
 
-  customElements.define('rtc-hat', RTChat);
+  if (!customElements.get('rtc-hat')) {
+    customElements.define('rtc-hat', RTChat);
+  }
 
   // Get script URL - works for both ES modules and IIFE bundles
   function getScriptUrl() {

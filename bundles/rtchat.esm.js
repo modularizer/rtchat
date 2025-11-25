@@ -9439,7 +9439,9 @@ class ChatHeader extends UIComponentBase {
   }
 }
 
-customElements.define('chat-header', ChatHeader);
+if (!customElements.get('chat-header')) {
+  customElements.define('chat-header', ChatHeader);
+}
 
 /**
  * ActiveUsersListHTMLElementBase - HTMLElement-based base for active users list
@@ -9662,7 +9664,9 @@ class ActiveUsersList extends ActiveUsersListHTMLElementBase {
   }
 }
 
-customElements.define('active-users-list', ActiveUsersList);
+if (!customElements.get('active-users-list')) {
+  customElements.define('active-users-list', ActiveUsersList);
+}
 
 /**
  * MessagesComponent - Component for displaying chat messages
@@ -9850,7 +9854,9 @@ class MessagesComponent extends UIComponentBase {
   }
 }
 
-customElements.define('messages-component', MessagesComponent);
+if (!customElements.get('messages-component')) {
+  customElements.define('messages-component', MessagesComponent);
+}
 
 /**
  * MessageInput - Component for message input and controls
@@ -10018,7 +10024,9 @@ class MessageInput extends UIComponentBase {
   // Call buttons are now in the call-management section, not in MessageInput
 }
 
-customElements.define('message-input', MessageInput);
+if (!customElements.get('message-input')) {
+  customElements.define('message-input', MessageInput);
+}
 
 /**
  * ChatBox - A Web Component for displaying and managing chat messages
@@ -12446,7 +12454,9 @@ class ChatBox extends HTMLElement {
 
 
 }
-customElements.define('chat-box', ChatBox);
+if (!customElements.get('chat-box')) {
+  customElements.define('chat-box', ChatBox);
+}
 
 /**
  * RTCVideoChat - Core logic for managing video streams and calls
@@ -12941,7 +12951,9 @@ class BasicVideoChat extends VideoChatHTMLElementBase {
 
 }
 
-customElements.define('video-chat', BasicVideoChat);
+if (!customElements.get('video-chat')) {
+  customElements.define('video-chat', BasicVideoChat);
+}
 
 /**
  * RTChat - Complete chat application with video calling and identity verification
@@ -13401,7 +13413,9 @@ window.SignedMQTTRTCClient = SignedMQTTRTCClient;
 // Store pending configs in an array - we'll match them to elements in connectedCallback
 const autoConfigPending = [];
 
-customElements.define('rtc-hat', RTChat);
+if (!customElements.get('rtc-hat')) {
+  customElements.define('rtc-hat', RTChat);
+}
 
 // Get script URL - works for both ES modules and IIFE bundles
 function getScriptUrl() {
