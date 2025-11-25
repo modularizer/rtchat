@@ -10055,7 +10055,7 @@ var RTChat = (function (exports) {
       } else {
         console.log("Sending message to " + this.topic + " subtopic " + subtopic, data);
       }
-      this.client.publish(this.topic, payloadString);
+      this.client.publish(this.topic, payloadString, { retain: false, qos: 0 });
       payload.sent = true;
       this.mqttHistory.push(payload);
       while (this.mqttHistory.length > this.maxHistoryLength){
@@ -10176,7 +10176,11 @@ var RTChat = (function (exports) {
           this.recordNameChange(payload.data.oldName, payload.data.newName);
       },
       unload: payload => {
-          this.disconnectFromUser(payload.sender);
+          // Only disconnect if we actually have a connection to this user
+          // This prevents race conditions where we receive old unload messages
+          if (this.rtcConnections[payload.sender]) {
+              this.disconnectFromUser(payload.sender);
+          }
           delete this.knownUsers[payload.sender];
       },
       RTCOffer: payload => {//rtc offer
