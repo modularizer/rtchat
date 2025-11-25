@@ -179,7 +179,7 @@ export default [
   // 4. DEVELOPMENT VERSIONS (unminified, with sourcemaps)
   // ============================================================================
   
-  // Core (unminified)
+  // Core IIFE (unminified)
   {
     input: 'src/core/index.js',
     output: {
@@ -197,7 +197,23 @@ export default [
     ]
   },
 
-  // UI (unminified)
+  // Core ESM (unminified)
+  {
+    input: 'src/core/index.js',
+    output: {
+      file: 'bundles/rtchat-core.esm.js',
+      format: 'esm',
+      sourcemap: true
+    },
+    plugins: [
+      nodeResolve({
+        browser: false,
+        preferBuiltins: false
+      })
+    ]
+  },
+
+  // UI IIFE (unminified)
   {
     input: 'src/ui/index.js',
     output: {
@@ -215,7 +231,23 @@ export default [
     ]
   },
 
-  // Full (unminified)
+  // UI ESM (unminified)
+  {
+    input: 'src/ui/index.js',
+    output: {
+      file: 'bundles/rtchat-ui.esm.js',
+      format: 'esm',
+      sourcemap: true
+    },
+    plugins: [
+      nodeResolve({
+        browser: true,
+        preferBuiltins: false
+      })
+    ]
+  },
+
+  // Full IIFE (unminified)
   {
     input: 'src/adapters/vanilla/rtchat.js',
     output: {
