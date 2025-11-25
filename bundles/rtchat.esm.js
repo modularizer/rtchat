@@ -1672,17 +1672,48 @@ class BaseMQTTRTCClient extends EventEmitter {
         console.log("Connected to MQTT: " + this.topic + " as " + this.name);
         this.emit('mqttconnected', this.topic, this.name);
     }
-  _onMQTTMessage(t, payloadString){
+  _onMQTTMessage(t, payloadData){
         if (t === this.topic){
             let payload;
+            let payloadString;
+            
             try{
-                // Use MQTTLoader for decompression
-                const decompressed = this.mqttLoader.decompress(payloadString);
-                payload = typeof decompressed === 'string' ? JSON.parse(decompressed) : decompressed;
+                // Try decompression first with original data format (might be Uint8Array)
+                const decompressed = this.mqttLoader.decompress(payloadData);
+                
+                // Convert decompressed data to string if it's not already
+                if (typeof decompressed === 'string') {
+                    payloadString = decompressed;
+                } else if (decompressed instanceof Uint8Array) {
+                    payloadString = new TextDecoder().decode(decompressed);
+                } else if (decompressed !== null && typeof decompressed === 'object') {
+                    // Already an object (decompression returned parsed JSON)
+                    payload = decompressed;
+                } else {
+                    payloadString = decompressed.toString();
+                }
+                
+                // Parse JSON if we got a string
+                if (!payload && payloadString) {
+                    payload = JSON.parse(payloadString);
+                }
             }catch(e){
-                // Fallback to uncompressed if decompression fails
-                payload = JSON.parse(payloadString);
+                // Fallback: convert to string and try to parse
+                try {
+                    if (payloadData instanceof Uint8Array) {
+                        payloadString = new TextDecoder().decode(payloadData);
+                    } else if (typeof payloadData !== 'string') {
+                        payloadString = payloadData.toString();
+                    } else {
+                        payloadString = payloadData;
+                    }
+                    payload = JSON.parse(payloadString);
+                } catch (parseError) {
+                    console.error("Failed to parse MQTT message:", parseError, "Raw data:", payloadData);
+                    return;
+                }
             }
+            
             if (payload.sender === this.name){
                 return;
             }
