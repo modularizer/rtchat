@@ -76,7 +76,8 @@ class CallManager extends EventEmitter {
     // Additional metadata tracking (not part of core state)
     this.pendingCalls = new Map(); // Map<user, {callInfo, promises, timeoutId, promptElement}>
     this.outgoingCalls = new Map(); // Map<user, {type, cancelFn, timeoutId}>
-    this.localStreams = new Map(); // Map<user, MediaStream>
+    // NOTE: We do NOT track localStreams here - they are tracked in rtcClient.rtcConnections[user].localStream
+    // This is the single source of truth for streams
     
     // Group call mesh tracking - tracks which users are in the same group call
     this.groupCallMesh = new Set(); // Set of users in the current group call mesh
@@ -269,10 +270,8 @@ class CallManager extends EventEmitter {
     const hasAudio = localStream?.getAudioTracks().length > 0 || 
                      remoteStream?.getAudioTracks().length > 0;
     
-    // Store local stream
-    if (localStream instanceof MediaStream) {
-      this.localStreams.set(sender, localStream);
-    }
+    // NOTE: localStream is already stored in rtcClient.rtcConnections[sender].localStream
+    // We don't need to store it again in CallManager
     
     // Update unified call state
     this.callState.setUserState(sender, {
@@ -339,19 +338,22 @@ class CallManager extends EventEmitter {
       this._startStatsPolling();
     }
     
+    // Get shared local stream from RTC client (single source of truth)
+    const sharedLocalStream = this.rtcClient?.sharedLocalStream || localStream;
+    
     // Emit event
     this.emit('callconnected', {
       sender,
-      localStream,
+      localStream: sharedLocalStream,
       remoteStream,
       type: hasVideo ? 'video' : 'audio'
     });
     
     // Use stream displays if provided
     if (hasVideo && this.videoDisplay && typeof this.videoDisplay.setStreams === 'function') {
-      this.videoDisplay.setStreams(sender, { localStream, remoteStream });
+      this.videoDisplay.setStreams(sender, { localStream: sharedLocalStream, remoteStream });
     } else if (hasAudio && this.audioDisplay && typeof this.audioDisplay.setStreams === 'function') {
-      this.audioDisplay.setStreams(sender, { localStream, remoteStream });
+      this.audioDisplay.setStreams(sender, { localStream: sharedLocalStream, remoteStream });
     }
   }
   
@@ -465,12 +467,13 @@ class CallManager extends EventEmitter {
   }
 
   /**
-   * Handle call ended event
+   * Handle call ended event from receiving "callended" message
+   * Only ends the specific call, keeps other connections active
    * @param {string} peerName - Name of the peer
    * @private
    */
   _handleCallEnded(peerName) {
-    console.log("CallManager._handleCallEnded: Called for " + peerName);
+    console.log("CallManager._handleCallEnded: Called for " + peerName + " (receiver side - only end this call)");
     // Check if call is already ended (idempotent)
     const currentState = this.callState.getUserState(peerName);
     if (currentState && currentState.status === 'inactive') {
@@ -479,80 +482,28 @@ class CallManager extends EventEmitter {
       return;
     }
     
-    // CRITICAL: Collect all users with active/pending calls BEFORE updating any state
-    // This ensures we get the complete list of all calls that need to be ended
-    const activeCallsBefore = this.callState.getActiveCalls();
-    const pendingCallsBefore = this.callState.getPendingCalls();
-    const allUsersToEnd = new Set([
-      ...activeCallsBefore.audio,
-      ...activeCallsBefore.video,
-      ...pendingCallsBefore,
-      ...this.outgoingCalls.keys()
-    ]);
+    // Only finalize THIS specific call (receiver side)
+    this._finalizeCallClosure(peerName);
     
-    console.log("CallManager._handleCallEnded: Found calls to end:", {
-      activeAudio: Array.from(activeCallsBefore.audio),
-      activeVideo: Array.from(activeCallsBefore.video),
-      pending: Array.from(pendingCallsBefore),
-      outgoing: Array.from(this.outgoingCalls.keys()),
-      allUsersToEnd: Array.from(allUsersToEnd)
-    });
-    
-    // Clear timeouts for the primary peer
-    const pendingCall = this.pendingCalls.get(peerName);
-    if (pendingCall && pendingCall.timeoutId) {
-      clearTimeout(pendingCall.timeoutId);
-    }
-    this.pendingCalls.delete(peerName);
-    
-    const outgoingCall = this.outgoingCalls.get(peerName);
-    if (outgoingCall && outgoingCall.timeoutId) {
-      clearTimeout(outgoingCall.timeoutId);
-    }
-    this.outgoingCalls.delete(peerName);
-    
-    // Update unified call state for the primary peer
-    this.callState.setUserState(peerName, {
-      status: 'inactive',
-      audio: false,
-      video: false
-    });
-    
-    this._releaseLocalStreamForUser(peerName);
-    this.latencyMetrics.delete(peerName);
-    
-    // Remove from group call mesh if in a group call
-    if (this.groupCallMesh.has(peerName)) {
-      this.groupCallMesh.delete(peerName);
-      console.log(`Removed ${peerName} from group call mesh. Remaining:`, Array.from(this.groupCallMesh));
-      
-      // If mesh is empty or only has ourselves, clear the group call
-      if (this.groupCallMesh.size <= 1) {
-        this.groupCallMesh.clear();
-        this.groupCallType = null;
-        console.log('Group call mesh cleared - no more participants');
-      }
-    }
-    
-    // CRITICAL: Emit callended event for the primary call - this must always happen
-    this.emit('callended', { peerName });
-    
-    // Check if there are any remaining active calls
+    // Check if there are any remaining active calls after closing this one
     const remainingActiveCalls = this.callState.getActiveCalls();
     const hasRemainingCalls = remainingActiveCalls.audio.size > 0 || remainingActiveCalls.video.size > 0;
     
-    // Only stop stats polling and reset mute states if no calls remain
-    // (For group calls, we want to keep stats polling and mute states active)
+    console.log("CallManager._handleCallEnded: After ending " + peerName + ", remaining calls:", {
+      audio: Array.from(remainingActiveCalls.audio),
+      video: Array.from(remainingActiveCalls.video),
+      hasRemainingCalls
+    });
+    
+    // Only stop stats polling if no calls remain
+    // Note: RTC layer handles closing streams/stopping tracks
     if (!hasRemainingCalls) {
       this._stopStatsPolling();
-      // Ensure any lingering local capture is stopped so the browser releases mic/cam access
-      this._releaseAllLocalStreams();
-      // Clear group call mesh if no calls remain
       this.groupCallMesh.clear();
       this.groupCallType = null;
-      // Only reset mute states if no calls remain
-      // Note: We keep mute state even when calls end, so user preferences persist
-      // this.muteState = { mic: false, speakers: false, video: false };
+      console.log("CallManager._handleCallEnded: No remaining calls, released all resources");
+    } else {
+      console.log("CallManager._handleCallEnded: Other calls still active, keeping resources");
     }
   }
 
@@ -580,8 +531,20 @@ class CallManager extends EventEmitter {
       }
     }
     
-    // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
-    this._handleCallEnded(peerName);
+    // Finalize only this specific call
+    this._finalizeCallClosure(peerName);
+    
+    // Check if there are any remaining active calls
+    const remainingActiveCalls = this.callState.getActiveCalls();
+    const hasRemainingCalls = remainingActiveCalls.audio.size > 0 || remainingActiveCalls.video.size > 0;
+    
+    // Only release resources if no calls remain
+    // Note: RTC layer handles closing streams/stopping tracks
+    if (!hasRemainingCalls) {
+      this._stopStatsPolling();
+      this.groupCallMesh.clear();
+      this.groupCallType = null;
+    }
     
     // Emit timeout event for UI notifications
     this.emit('calltimeout', { peerName, direction });
@@ -620,52 +583,207 @@ class CallManager extends EventEmitter {
         }
       }
       
-      this._handleCallEnded(user);
+      // Finalize only this specific call
+      this._finalizeCallClosure(user);
+      
+      // Check if there are any remaining active calls
+      const remainingActiveCalls = this.callState.getActiveCalls();
+      const hasRemainingCalls = remainingActiveCalls.audio.size > 0 || remainingActiveCalls.video.size > 0;
+      
+      // Only release resources if no calls remain
+      // Note: RTC layer handles closing streams/stopping tracks
+      if (!hasRemainingCalls) {
+        this._stopStatsPolling();
+        this.groupCallMesh.clear();
+        this.groupCallType = null;
+      }
     }
   }
 
   /**
-   * Stop every track on a MediaStream, logging (but not throwing) on failure
-   * @param {MediaStream} stream - Stream to stop
-   * @param {string} owner - Optional owner for logging context
+   * Log all active tracks and their dependent streams
+   * Single source of truth: rtcClient.rtcConnections
    * @private
    */
-  _stopStreamTracks(stream, owner = 'unknown') {
-    if (!stream || typeof stream.getTracks !== 'function') {
-      return;
-    }
-    const tracks = stream.getTracks();
-    tracks.forEach(track => {
-      try {
-        track.stop();
-      } catch (err) {
-        console.warn(`CallManager: Failed to stop ${track?.kind || 'media'} track for ${owner}`, err);
+  _logActiveTracksAndStreams() {
+    console.log("=== ACTIVE TRACKS AND STREAMS (Single Source: rtcConnections) ===");
+    
+    const allTracks = new Map(); // track.id -> {track, owners: []}
+    
+    // Collect from rtcConnections ONLY (single source of truth)
+    if (this.rtcClient && this.rtcClient.rtcConnections) {
+      for (const [user, conn] of Object.entries(this.rtcClient.rtcConnections)) {
+        if (conn && conn.localStream && conn.localStream.getTracks) {
+          conn.localStream.getTracks().forEach(track => {
+            if (!allTracks.has(track.id)) {
+              allTracks.set(track.id, { track, owners: [] });
+            }
+            allTracks.get(track.id).owners.push(user);
+          });
+        }
       }
-    });
+    }
+    
+    console.log(`Total unique tracks: ${allTracks.size}`);
+    for (const [trackId, {track, owners}] of allTracks.entries()) {
+      console.log(`  Track ${track.kind} ${trackId.substring(0, 8)}... (readyState: ${track.readyState})`);
+      console.log(`    - Used by rtcConnections: [${owners.join(', ')}]`);
+    }
+    console.log("==================================================================");
   }
 
   /**
-   * Stop and remove the local stream associated with a user
+   * Close a stream properly: stop its tracks only if not shared by other streams
+   * CRITICAL: This is the ONLY method that should stop tracks
+   * Single source of truth: rtcClient.rtcConnections
+   * @param {MediaStream} stream - Stream to close
+   * @param {string} streamOwner - Owner identifier (for checking if track is shared)
+   * @private
+   */
+  _closeStream(stream, streamOwner) {
+    if (!stream || typeof stream.getTracks !== 'function') {
+      console.warn(`_closeStream: Invalid stream for ${streamOwner}`);
+      return;
+    }
+    
+    const tracks = stream.getTracks();
+    console.log(`_closeStream: Closing stream for ${streamOwner} with ${tracks.length} track(s)`);
+    
+    tracks.forEach(track => {
+      // Check if ANY other RTC connection uses this track (single source of truth)
+      let trackShared = false;
+      
+      if (this.rtcClient && this.rtcClient.rtcConnections) {
+        for (const [user, conn] of Object.entries(this.rtcClient.rtcConnections)) {
+          if (user === streamOwner) continue; // Skip the connection we're closing
+          if (conn && conn.localStream && conn.localStream.getTracks) {
+            if (conn.localStream.getTracks().some(t => t.id === track.id)) {
+              trackShared = true;
+              console.log(`_closeStream: Track ${track.kind} ${track.id.substring(0,8)}... is shared with rtcConnection[${user}]`);
+              break;
+            }
+          }
+        }
+      }
+      
+      // Only stop track if NOT shared
+      if (!trackShared) {
+        console.log(`_closeStream: Stopping ${track.kind} track ${track.id.substring(0,8)}... (readyState: ${track.readyState})`);
+        try {
+          track.stop();
+          console.log(`_closeStream: Stopped track (new readyState: ${track.readyState})`);
+        } catch (err) {
+          console.warn(`_closeStream: Failed to stop track:`, err);
+        }
+      } else {
+        console.log(`_closeStream: Keeping ${track.kind} track ${track.id.substring(0,8)}... alive (shared)`);
+      }
+    });
+    
+    // Log state after closing
+    this._logActiveTracksAndStreams();
+  }
+
+  /**
+   * Close the stream for a specific RTC connection
+   * Single source of truth: rtcClient.rtcConnections[user].localStream
    * @param {string} user - User identifier
    * @private
    */
   _releaseLocalStreamForUser(user) {
-    const stream = this.localStreams.get(user);
-    if (stream) {
-      this._stopStreamTracks(stream, user);
+    console.log(`_releaseLocalStreamForUser: Closing stream for ${user}`);
+    this._logActiveTracksAndStreams();
+    
+    if (!this.rtcClient || !this.rtcClient.rtcConnections || !this.rtcClient.rtcConnections[user]) {
+      console.log(`_releaseLocalStreamForUser: No RTC connection for ${user}`);
+      return;
     }
-    this.localStreams.delete(user);
+    
+    const conn = this.rtcClient.rtcConnections[user];
+    const stream = conn.localStream;
+    
+    if (!stream) {
+      console.log(`_releaseLocalStreamForUser: No localStream in connection for ${user}`);
+      return;
+    }
+    
+    // Remove from connection BEFORE closing (so _closeStream doesn't see it when checking)
+    conn.localStream = null;
+    
+    // Close the stream (will check if tracks are shared and stop accordingly)
+    this._closeStream(stream, user);
   }
 
   /**
-   * Stop and clear all tracked local streams
+   * Fully tear down local bookkeeping for a peer that has ended
+   * @param {string} user
+   * @private
+   */
+  _finalizeCallClosure(user) {
+    if (!user) {
+      return;
+    }
+    
+    // Clear pending call timeouts
+    const pendingCall = this.pendingCalls.get(user);
+    if (pendingCall && pendingCall.timeoutId) {
+      clearTimeout(pendingCall.timeoutId);
+    }
+    this.pendingCalls.delete(user);
+    
+    // Clear outgoing call timeouts
+    const outgoingCall = this.outgoingCalls.get(user);
+    if (outgoingCall && outgoingCall.timeoutId) {
+      clearTimeout(outgoingCall.timeoutId);
+    }
+    this.outgoingCalls.delete(user);
+    
+    // Reset unified call state
+    this.callState.setUserState(user, {
+      status: 'inactive',
+      audio: false,
+      video: false
+    });
+    
+    // Note: RTC layer handles closing streams/stopping tracks via endCallWithUser
+    this.latencyMetrics.delete(user);
+    
+    // Remove from group call mesh (and clear when empty)
+    if (this.groupCallMesh.has(user)) {
+      this.groupCallMesh.delete(user);
+      console.log(`Removed ${user} from group call mesh. Remaining:`, Array.from(this.groupCallMesh));
+      if (this.groupCallMesh.size <= 1) {
+        this.groupCallMesh.clear();
+        this.groupCallType = null;
+        console.log('Group call mesh cleared - no more participants');
+      }
+    }
+    
+    // Notify UI layers that this peer is gone
+    this.emit('callended', { peerName: user });
+  }
+
+  /**
+   * Close all streams from RTC connections
+   * Single source of truth: rtcClient.rtcConnections
    * @private
    */
   _releaseAllLocalStreams() {
-    for (const [user, stream] of this.localStreams.entries()) {
-      this._stopStreamTracks(stream, user);
+    console.log(`_releaseAllLocalStreams: Closing all RTC connection streams`);
+    
+    if (!this.rtcClient || !this.rtcClient.rtcConnections) {
+      console.log(`_releaseAllLocalStreams: No RTC connections`);
+      return;
     }
-    this.localStreams.clear();
+    
+    // Get all users with connections
+    const users = Object.keys(this.rtcClient.rtcConnections);
+    console.log(`_releaseAllLocalStreams: Found ${users.length} connections`);
+    
+    // Close each stream individually
+    for (const user of users) {
+      this._releaseLocalStreamForUser(user);
+    }
   }
 
   /**
@@ -962,11 +1080,14 @@ class CallManager extends EventEmitter {
 
   /**
    * End a call with a user
+   * This ends the specific call and sends "endcall" message to peer
+   * Note: For ending all calls (button click), use endAllCalls() instead
    * @param {string} user - Name of the user
    */
   endCall(user) {
-    // First, tell RTC client to end the call and send "endcall" message to peer
-    // This must happen while the call is still active so the message can be sent
+    console.log("CallManager.endCall: Ending call with " + user);
+    
+    // Tell RTC client to end the call and send "endcall" message to peer
     if (this.rtcClient && this.rtcClient.endCallWithUser) {
       try {
         this.rtcClient.endCallWithUser(user);
@@ -975,21 +1096,52 @@ class CallManager extends EventEmitter {
       }
     }
     
-    // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
-    // This ensures when any call ends, all other calls are also ended
-    this._handleCallEnded(user);
+    // Finalize this specific call locally
+    this._finalizeCallClosure(user);
+    
+    // Check if there are any remaining active calls
+    const remainingActiveCalls = this.callState.getActiveCalls();
+    const hasRemainingCalls = remainingActiveCalls.audio.size > 0 || remainingActiveCalls.video.size > 0;
+    
+    // Only stop stats polling if no calls remain
+    // Note: RTC layer handles closing streams/stopping tracks
+    if (!hasRemainingCalls) {
+      this._stopStatsPolling();
+      this.groupCallMesh.clear();
+      this.groupCallType = null;
+      console.log("CallManager.endCall: No remaining calls, released all resources");
+    } else {
+      console.log("CallManager.endCall: Other calls still active, keeping resources");
+    }
   }
 
   /**
-   * End all active calls
+   * End all active calls (initiator side - button click)
+   * Delegates to RTC layer which handles streams and tracks
    */
   endAllCalls() {
+    console.log("CallManager.endAllCalls: Ending ALL calls");
+    
+    // Get users from call state
     const activeCalls = this.callState.getActiveCalls();
     const pendingCalls = this.callState.getPendingCalls();
     const allUsers = new Set([...activeCalls.video, ...activeCalls.audio, ...pendingCalls, ...this.outgoingCalls.keys()]);
+    
+    // ALSO get users from rtcConnections (source of truth for actual connections)
+    if (this.rtcClient && this.rtcClient.rtcConnections) {
+      for (const user of Object.keys(this.rtcClient.rtcConnections)) {
+        allUsers.add(user);
+      }
+    }
+    
+    console.log("CallManager.endAllCalls: All users to end:", Array.from(allUsers));
+    
+    // Delegate to RTC client to end calls (it handles streams/tracks)
     for (const user of allUsers) {
       this.endCall(user);
     }
+    
+    console.log("CallManager.endAllCalls: Complete");
   }
 
   /**
@@ -1247,9 +1399,9 @@ class CallManager extends EventEmitter {
     this.endAllCalls();
     
     // Clear all state
+    // Note: RTC layer handles closing streams/stopping tracks
     this.pendingCalls.clear();
     this.outgoingCalls.clear();
-    this._releaseAllLocalStreams();
     this.latencyMetrics.clear();
     
     // Clear unified call state

@@ -477,7 +477,13 @@ var RTChat = (function (exports) {
         throw new Error('VideoClass must be a class implementing VideoInterface');
       }
       
+      // Ensure container has grid class from the start
+      if (this.container && !this.container.classList.contains('video-stream-display-container')) {
+        this.container.classList.add('video-stream-display-container');
+      }
+      
       this._setupStyles();
+      this._localStream = null;
     }
 
     /**
@@ -490,42 +496,132 @@ var RTChat = (function (exports) {
       const root = this.container.getRootNode ? this.container.getRootNode() : document;
       
       // Check if styles already exist in the root
-      if (root.querySelector && root.querySelector('style[data-video-stream-display]')) {
-        return;
+      if (root.querySelector) {
+        const existingStyle = root.querySelector('style[data-video-stream-display]');
+        if (existingStyle) {
+          const version = existingStyle.getAttribute('data-style-version');
+          if (version === '2') {
+            return;
+          }
+          if (existingStyle.parentNode) {
+            existingStyle.parentNode.removeChild(existingStyle);
+          }
+        }
       }
 
       const style = document.createElement('style');
       style.setAttribute('data-video-stream-display', 'true');
+      style.setAttribute('data-style-version', '2');
       style.textContent = `
+      .video-stream-display-container {
+        display: none;
+        gap: 10px;
+        width: 100%;
+        padding: 10px;
+        min-height: 300px;
+      }
+      .video-stream-display-container.is-active {
+        display: grid !important;
+      }
+      .video-stream-display-container.count-1 {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr;
+      }
+      /* Two remote participants: place both side by side */
+      .video-stream-display-container.count-2 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-rows: 1fr;
+      }
+      /* 3 people: three equal columns */
+      .video-stream-display-container.count-3 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-rows: 1fr;
+      }
+      /* 4 people: 2x2 grid */
+      .video-stream-display-container.count-4 {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        grid-template-rows: repeat(2, minmax(0, 1fr));
+      }
+      /* 5-6 people: 2x3 grid */
+      .video-stream-display-container.count-5,
+      .video-stream-display-container.count-6 {
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        grid-template-rows: repeat(2, minmax(0, 1fr));
+      }
+      /* 7-9 people: 3x3 grid */
+      .video-stream-display-container.count-7,
+      .video-stream-display-container.count-8,
+      .video-stream-display-container.count-9 {
+        grid-template-columns: repeat(3, 1fr);
+        grid-template-rows: repeat(3, 1fr);
+      }
+      /* 10+ people: auto-fit grid */
+      .video-stream-display-container.count-10-plus {
+        grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+        grid-auto-rows: minmax(150px, 1fr);
+      }
+      /* Two-person overlay layout */
+      .video-stream-display-container.two-person-overlay {
+        grid-template-columns: 1fr;
+        grid-template-rows: 1fr;
+      }
+      .video-stream-display-container.two-person-overlay .video-stream-container {
+        position: relative;
+      }
       .video-stream-container {
         position: relative;
         width: 100%;
-        max-width: 100%;
-        margin-bottom: 10px;
+        aspect-ratio: 16 / 9;
         background: #000;
         border-radius: 5px;
         overflow: hidden;
+        border: 2px solid #333;
       }
       .video-stream-container video {
         width: 100%;
-        height: auto;
+        height: 100%;
         display: block;
+        object-fit: cover;
       }
       .video-stream-remote {
         width: 100%;
+        height: 100%;
       }
       .video-stream-local {
+        display: none;
+        width: 0;
+        height: 0;
+        opacity: 0;
+        pointer-events: none;
+      }
+      .video-stream-display-container.two-person-overlay .video-stream-container:first-child .video-stream-local {
+        display: block !important;
         position: absolute;
-        width: ${this.options.localVideoSize || '25%'};
-        max-width: ${this.options.localVideoSize || '25%'};
+        width: 30%;
+        max-width: 30%;
+        height: auto;
+        aspect-ratio: 16 / 9;
         top: 10px;
         right: 10px;
         border: 2px solid white;
         box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
         border-radius: 5px;
         background: #000;
+        opacity: 1 !important;
+        pointer-events: auto !important;
         z-index: 10;
-        object-fit: cover;
+      }
+      .video-stream-label {
+        position: absolute;
+        bottom: 10px;
+        left: 10px;
+        background: rgba(0, 0, 0, 0.7);
+        color: white;
+        padding: 4px 8px;
+        border-radius: 4px;
+        font-size: 12px;
+        z-index: 11;
+        pointer-events: none;
       }
     `;
       
@@ -565,11 +661,16 @@ var RTChat = (function (exports) {
         throw new Error('peerName is required');
       }
 
+      // Ensure container has grid class
+      if (!this.container.classList.contains('video-stream-display-container')) {
+        this.container.classList.add('video-stream-display-container');
+      }
+
       // Get or create video container for this peer
       let streamData = this.activeStreams[peerName];
       
       if (!streamData || !streamData.container) {
-        const { container, remoteVideo, localVideo } = this._createVideoContainer(peerName);
+        const { container, remoteVideo, localVideo, label } = this._createVideoContainer(peerName);
         this.container.appendChild(container);
         
         // Initialize tracking
@@ -577,26 +678,33 @@ var RTChat = (function (exports) {
           container,
           remoteVideo, // VideoInterface instance
           localVideo,  // VideoInterface instance
+          label,       // Label element
           streams: {},
           trackEndHandlers: []
         };
         this.activeStreams[peerName] = streamData;
       }
 
-      // Set streams using VideoInterface methods
+      // Set remote stream (always shown in grid)
       if (remoteStream && remoteStream instanceof MediaStream) {
         streamData.remoteVideo.setStream(remoteStream);
         streamData.remoteVideo.show();
+        if (streamData.label) {
+          streamData.label.textContent = peerName;
+          streamData.label.style.display = 'block';
+        }
       } else {
         streamData.remoteVideo.setStream(null);
+        if (streamData.label) {
+          streamData.label.style.display = 'none';
+        }
       }
       
-      if (localStream && localStream instanceof MediaStream) {
-        streamData.localVideo.setStream(localStream);
-        streamData.localVideo.show();
-      } else {
-        streamData.localVideo.setStream(null);
-        streamData.localVideo.hide();
+      // Track latest local stream (may be reused across peers)
+      if (localStream instanceof MediaStream) {
+        this._localStream = localStream;
+      } else if (localStream === null) {
+        this._localStream = null;
       }
 
       // Store streams for cleanup
@@ -606,17 +714,150 @@ var RTChat = (function (exports) {
       // Setup track end handlers
       this._setupTrackEndHandlers(peerName, localStream, remoteStream);
 
-      // Show container if hidden
-      if (this.container.style.display === 'none') {
-        this.container.style.display = 'block';
+      // Sync local video layout (overlay vs grid tile)
+      this._refreshLocalVideoLayout();
+
+      // Update grid layout based on number of participants
+      this._updateGridLayout();
+
+      this._updateContainerVisibility();
+    }
+    
+    /**
+     * Ensure local video is displayed either as overlay (1 remote) or grid tile (2+ remotes)
+     * @private
+     */
+    _refreshLocalVideoLayout() {
+      const remoteParticipants = Object.keys(this.activeStreams).filter(key => key !== '__local__');
+      const remoteCount = remoteParticipants.length;
+      const hasLocalStream = this._localStream instanceof MediaStream;
+
+      // Hide overlays by default
+      for (const peer of remoteParticipants) {
+        const data = this.activeStreams[peer];
+        if (data && data.localVideo) {
+          data.localVideo.setStream(null);
+          data.localVideo.hide();
+          const el = data.localVideo.getElement ? data.localVideo.getElement() : null;
+          if (el) {
+            el.style.display = 'none';
+          }
+        }
       }
+
+      if (hasLocalStream && remoteCount === 1) {
+        const targetPeer = remoteParticipants[0];
+        const targetData = targetPeer ? this.activeStreams[targetPeer] : null;
+        if (targetData && targetData.localVideo) {
+          targetData.localVideo.setStream(this._localStream);
+          targetData.localVideo.show();
+          const overlayEl = targetData.localVideo.getElement ? targetData.localVideo.getElement() : null;
+          if (overlayEl) {
+            overlayEl.style.display = 'block';
+          }
+        }
+        this._deleteStreamData('__local__');
+      } else if (hasLocalStream && remoteCount >= 2) {
+        this._updateLocalVideoInGrid(this._localStream);
+      } else {
+        this._deleteStreamData('__local__');
+      }
+    }
+    
+    /**
+     * Update local video in grid for group calls (3+ participants)
+     * @param {MediaStream} localStream - Local video stream
+     * @private
+     */
+    _updateLocalVideoInGrid(localStream) {
+      const localVideoKey = '__local__';
+      let localStreamData = this.activeStreams[localVideoKey];
+      
+      if (!localStreamData || !localStreamData.container) {
+        // Create local video container
+        const { container, remoteVideo, label } = this._createVideoContainer(localVideoKey);
+        container.classList.add('local-video-container');
+        // Insert at the beginning for 3-person layout (local video first)
+        const firstChild = this.container.firstChild;
+        if (firstChild) {
+          this.container.insertBefore(container, firstChild);
+        } else {
+          this.container.appendChild(container);
+        }
+        
+        localStreamData = {
+          container,
+          remoteVideo, // Use remoteVideo element for local stream in grid
+          localVideo: null, // Not used for grid display
+          label,
+          streams: { local: localStream, remote: null },
+          trackEndHandlers: []
+        };
+        this.activeStreams[localVideoKey] = localStreamData;
+      }
+      
+      // Set local stream to the container
+      if (localStreamData.remoteVideo) {
+        localStreamData.remoteVideo.setStream(localStream);
+        localStreamData.remoteVideo.show();
+        if (localStreamData.label) {
+          localStreamData.label.textContent = 'You';
+          localStreamData.label.style.display = 'block';
+        }
+      }
+    }
+
+    /**
+     * Update grid layout based on number of active streams
+     * Supports unlimited participants with specific layouts
+     * @private
+     */
+    _updateGridLayout() {
+      // Count only remote participants (exclude local video container)
+      const remoteParticipants = Object.keys(this.activeStreams).filter(key => key !== '__local__');
+      const hasLocalVideoInGrid = this.activeStreams['__local__'] !== undefined;
+      const remoteCount = remoteParticipants.length;
+      const totalCount = remoteCount + (hasLocalVideoInGrid ? 1 : 0);
+      
+      // Remove all layout classes
+      const countClasses = Array.from(this.container.classList).filter(cls => cls.startsWith('count-'));
+      countClasses.forEach(cls => this.container.classList.remove(cls));
+      this.container.classList.remove('two-person-overlay');
+      
+      // Overlay layout for exactly one remote participant (classic 2-person view)
+      if (remoteCount === 1 && !hasLocalVideoInGrid && this._localStream instanceof MediaStream) {
+        this.container.classList.add('count-1');
+        this.container.classList.add('two-person-overlay');
+        console.log('Updated grid layout: two-person overlay mode');
+        return;
+      }
+      
+      // Apply layout based on total visible tiles
+      if (totalCount <= 1) {
+        this.container.classList.add('count-1');
+      } else if (totalCount === 2) {
+        this.container.classList.add('count-2');
+      } else if (totalCount === 3) {
+        this.container.classList.add('count-3');
+      } else if (totalCount === 4) {
+        this.container.classList.add('count-4');
+      } else if (totalCount === 5 || totalCount === 6) {
+        this.container.classList.add(`count-${totalCount}`);
+      } else if (totalCount >= 7 && totalCount <= 9) {
+        this.container.classList.add(`count-${totalCount}`);
+      } else if (totalCount >= 10) {
+        this.container.classList.add('count-10-plus');
+      }
+      
+      const localContribution = hasLocalVideoInGrid ? 1 : 0;
+      console.log(`Updated grid layout: ${totalCount} tiles (${remoteCount} remote + ${localContribution} local)`);
     }
 
     /**
      * Create a video container element for a peer
      * Implements VideoStreamDisplayBase._createVideoContainer
      * @param {string} peerName - Name of the peer
-     * @returns {Object} Object with container, remoteVideo, and localVideo
+     * @returns {Object} Object with container, remoteVideo, localVideo, and label
      * @protected
      */
     _createVideoContainer(peerName) {
@@ -638,7 +879,14 @@ var RTChat = (function (exports) {
         container.appendChild(remoteVideoElement);
       }
 
-      // Create local video using VideoInterface implementation
+      // Create label for participant name
+      const label = document.createElement('div');
+      label.className = 'video-stream-label';
+      label.textContent = peerName;
+      label.setAttribute('data-peer', peerName);
+      container.appendChild(label);
+
+      // Create local video using VideoInterface implementation for overlay mode
       const localVideo = new this.VideoClass({
         autoplay: true,
         playsinline: true,
@@ -652,25 +900,25 @@ var RTChat = (function (exports) {
         container.appendChild(localVideoElement);
       }
 
-      return { container, remoteVideo, localVideo };
+      return { container, remoteVideo, localVideo, label };
     }
 
-    // _setupTrackEndHandlers is inherited from VideoStreamDisplayBase
-
     /**
-     * Remove video streams for a peer
-     * Implements VideoStreamDisplayBase.removeStreams and StreamDisplayInterface.removeStreams
-     * @param {string} peerName - Name of the peer
+     * Delete stream data for a peer without triggering layout updates
+     * @param {string} peerName
+     * @private
      */
-    removeStreams(peerName) {
+    _deleteStreamData(peerName) {
       const streamData = this.activeStreams[peerName];
       if (!streamData) {
         return;
       }
 
-      // Stop all tracks using base class helper
+      // Only stop REMOTE tracks (local tracks may be shared with other connections)
+      // The RTC layer handles stopping local tracks when appropriate
       if (streamData.streams) {
-        this._stopStreamTracks(streamData.streams.local);
+        // Don't stop local stream tracks - they're managed by RTC layer
+        // this._stopStreamTracks(streamData.streams.local);
         this._stopStreamTracks(streamData.streams.remote);
       }
 
@@ -702,13 +950,39 @@ var RTChat = (function (exports) {
         streamData.container.parentNode.removeChild(streamData.container);
       }
 
-      // Remove from active streams
       delete this.activeStreams[peerName];
+    }
 
-      // Hide container if no active streams
-      if (Object.keys(this.activeStreams).length === 0) {
-        this.container.style.display = 'none';
+    // _setupTrackEndHandlers is inherited from VideoStreamDisplayBase
+
+    /**
+     * Remove video streams for a peer
+     * Implements VideoStreamDisplayBase.removeStreams and StreamDisplayInterface.removeStreams
+     * @param {string} peerName - Name of the peer
+     */
+    removeStreams(peerName) {
+      if (!this.activeStreams[peerName]) {
+        return;
       }
+
+      this._deleteStreamData(peerName);
+
+      // Re-sync overlay/grid state after removal
+      this._refreshLocalVideoLayout();
+
+      // Update grid layout
+      this._updateGridLayout();
+
+      this._updateContainerVisibility();
+    }
+
+    /**
+     * Toggle container visibility class based on active streams
+     * @private
+     */
+    _updateContainerVisibility() {
+      const hasStreams = Object.keys(this.activeStreams).length > 0;
+      this.container.classList.toggle('is-active', hasStreams);
     }
 
     // removeAllStreams, hasActiveStreams, getActivePeers, show, and hide
@@ -1040,13 +1314,15 @@ var RTChat = (function (exports) {
         return;
       }
 
-      // Stop all tracks
+      // Only stop REMOTE tracks (local tracks may be shared with other connections)
+      // The RTC layer handles stopping local tracks when appropriate
       if (streamData.streams) {
-        if (streamData.streams.local) {
-          streamData.streams.local.getTracks().forEach(track => {
-            track.stop();
-          });
-        }
+        // Don't stop local stream tracks - they're managed by RTC layer
+        // if (streamData.streams.local) {
+        //   streamData.streams.local.getTracks().forEach(track => {
+        //     track.stop();
+        //   });
+        // }
         if (streamData.streams.remote) {
           streamData.streams.remote.getTracks().forEach(track => {
             track.stop();
@@ -2794,6 +3070,7 @@ var RTChat = (function (exports) {
      * @param {VideoControllerInterface} options.videoController - Optional video controller
      * @param {RingerInterface} options.ringer - Optional ringtone component
      * @param {NotificationInterface} options.notifications - Optional notification component
+     * @param {Object} options.chatManager - Optional ChatManager instance for getting active users
      */
     constructor(rtcClient, options = {}) {
       super();
@@ -2813,6 +3090,7 @@ var RTChat = (function (exports) {
       this.videoController = options.videoController || null;
       this.ringer = options.ringer || null;
       this.notifications = options.notifications || null;
+      this.chatManager = options.chatManager || null;
       
       // Unified call state tracking (platform-agnostic, UI-agnostic)
       this.callState = new CallState();
@@ -2820,7 +3098,12 @@ var RTChat = (function (exports) {
       // Additional metadata tracking (not part of core state)
       this.pendingCalls = new Map(); // Map<user, {callInfo, promises, timeoutId, promptElement}>
       this.outgoingCalls = new Map(); // Map<user, {type, cancelFn, timeoutId}>
-      this.localStreams = new Map(); // Map<user, MediaStream>
+      // NOTE: We do NOT track localStreams here - they are tracked in rtcClient.rtcConnections[user].localStream
+      // This is the single source of truth for streams
+      
+      // Group call mesh tracking - tracks which users are in the same group call
+      this.groupCallMesh = new Set(); // Set of users in the current group call mesh
+      this.groupCallType = null; // 'audio' or 'video' - type of the group call
       
       // Mute state
       this.muteState = {
@@ -2878,12 +3161,13 @@ var RTChat = (function (exports) {
         this._handleCallTimeout(peerName, 'incoming');
       }, this.options.callTimeout);
       
-      // Track pending call
+      // Track pending call (autoAccepted flag set after we determine preference)
       this.pendingCalls.set(peerName, {
         callInfo,
         promises,
         timeoutId,
-        promptElement: null // UI can set this
+        promptElement: null,
+        autoAccepted: false
       });
       
       // Update unified call state
@@ -2893,27 +3177,51 @@ var RTChat = (function (exports) {
         video: callInfo.video === true
       });
       
-      // Start ringing if ringer is provided
-      if (this.ringer && typeof this.ringer.start === 'function') {
-        console.log('Starting ringtone...');
-        this.ringer.start().catch(err => {
-          console.error('Could not start ringtone:', err);
-        });
-      } else {
-        console.warn('No ringer available or ringer.start is not a function', { 
-          hasRinger: !!this.ringer, 
-          ringerType: this.ringer ? typeof this.ringer : 'undefined',
-          hasStart: this.ringer ? typeof this.ringer.start : 'N/A'
-        });
+      const shouldAutoAccept = this._shouldAutoAcceptIncomingCall(peerName, callInfo);
+      const pendingEntry = this.pendingCalls.get(peerName);
+      if (pendingEntry) {
+        pendingEntry.autoAccepted = shouldAutoAccept;
       }
       
-      // Emit event for UI to handle
+      if (!shouldAutoAccept) {
+        // Start ringing if ringer is provided
+        if (this.ringer && typeof this.ringer.start === 'function') {
+          console.log('Starting ringtone...');
+          this.ringer.start().catch(err => {
+            console.error('Could not start ringtone:', err);
+          });
+        } else {
+          console.warn('No ringer available or ringer.start is not a function', { 
+            hasRinger: !!this.ringer, 
+            ringerType: this.ringer ? typeof this.ringer : 'undefined',
+            hasStart: this.ringer ? typeof this.ringer.start : 'N/A'
+          });
+        }
+      } else {
+        // Stop any ringing ASAP since we're auto-accepting
+        if (this.ringer && typeof this.ringer.stop === 'function') {
+          this.ringer.stop();
+        }
+      }
+      
+      // Emit event for UI to handle (even if auto-accepting, so UI can update state)
       this.emit('incomingcall', {
         peerName,
         callInfo,
         promises,
-        timeoutId
+        timeoutId,
+        autoAccepted: shouldAutoAccept
       });
+      
+      if (shouldAutoAccept) {
+        console.log(`Auto-accepting incoming call from ${peerName} (already in group call)`);
+        const autoPending = this.pendingCalls.get(peerName);
+        if (autoPending && autoPending.timeoutId) {
+          clearTimeout(autoPending.timeoutId);
+          autoPending.timeoutId = null;
+        }
+        return Promise.resolve(true);
+      }
       
       // Use callUI if provided, otherwise auto-accept
       if (this.callUI && typeof this.callUI.showIncomingCallPrompt === 'function') {
@@ -2925,19 +3233,53 @@ var RTChat = (function (exports) {
     }
 
     /**
+     * Determine whether we should auto-accept an incoming call
+     * Auto-accept when we're already in a group call (mesh) or already have an active call,
+     * so additional mesh connections don't re-prompt the user.
+     * @param {string} peerName
+     * @param {Object} callInfo
+     * @returns {boolean}
+     * @private
+     */
+    _shouldAutoAcceptIncomingCall(peerName, callInfo) {
+      const activeCalls = this.callState.getActiveCalls();
+      const totalActiveCalls = activeCalls.audio.size + activeCalls.video.size;
+      const isAlreadyInGroupCall = this.groupCallMesh.size > 0;
+      
+      // Auto-accept if we already have at least one active call or if the group mesh is active.
+      if (isAlreadyInGroupCall) {
+        return true;
+      }
+      
+      if (totalActiveCalls > 0) {
+        return true;
+      }
+      
+      // Default: require explicit acceptance
+      return false;
+    }
+
+    /**
      * Handle call connected event
      * @param {string} sender - Name of the peer
      * @param {Object} streams - Stream objects {localStream, remoteStream}
      * @private
      */
     _handleCallConnected(sender, {localStream, remoteStream}) {
-      // Clear timeout
+      // Clear pending-call timeout (incoming)
       const pendingCall = this.pendingCalls.get(sender);
       if (pendingCall && pendingCall.timeoutId) {
         clearTimeout(pendingCall.timeoutId);
         pendingCall.timeoutId = null;
       }
       this.pendingCalls.delete(sender);
+
+      // Clear outgoing-call timeout (our dial)
+      const outgoingCall = this.outgoingCalls.get(sender);
+      if (outgoingCall && outgoingCall.timeoutId) {
+        clearTimeout(outgoingCall.timeoutId);
+      }
+      this.outgoingCalls.delete(sender);
       
       // Stop ringing if ringer is provided
       if (this.ringer && typeof this.ringer.stop === 'function') {
@@ -2950,10 +3292,8 @@ var RTChat = (function (exports) {
       const hasAudio = localStream?.getAudioTracks().length > 0 || 
                        remoteStream?.getAudioTracks().length > 0;
       
-      // Store local stream
-      if (localStream instanceof MediaStream) {
-        this.localStreams.set(sender, localStream);
-      }
+      // NOTE: localStream is already stored in rtcClient.rtcConnections[sender].localStream
+      // We don't need to store it again in CallManager
       
       // Update unified call state
       this.callState.setUserState(sender, {
@@ -2962,35 +3302,200 @@ var RTChat = (function (exports) {
         video: hasVideo
       });
       
+      // Check if we should add to group call mesh
+      // If we're already in a group call, add them
+      // OR if we now have 2+ active calls, start a group call mesh
+      // OR if there are 2+ other users in the room, treat this as a group call
+      const currentActiveCalls = this.callState.getActiveCalls();
+      const totalActiveCalls = currentActiveCalls.audio.size + currentActiveCalls.video.size;
+      const activeUsers = this._getActiveUsers();
+      const hasMultipleUsers = activeUsers.length >= 2; // 2+ other users in room
+      
+      // Determine call type from the current call (hasVideo already determined above)
+      const callType = hasVideo ? 'video' : 'audio';
+      
+      if (this.groupCallMesh.size > 0) {
+        // Already in a group call - add new participant
+        this.groupCallMesh.add(sender);
+        console.log(`Added ${sender} to existing group call mesh. Current mesh:`, Array.from(this.groupCallMesh));
+        
+        // CRITICAL: Automatically connect to all other participants in the mesh
+        // This creates the full mesh network - when B joins, B automatically calls C, D, etc.
+        this._connectToOtherMeshParticipants(sender);
+      } else if (totalActiveCalls >= 2 || hasMultipleUsers) {
+        // We now have 2+ active calls OR 2+ users in room - this is a group call!
+        // Initialize the mesh with all current participants and all active users
+        this.groupCallMesh.clear();
+        this.groupCallMesh.add(this.rtcClient.name); // Add ourselves
+        this.groupCallMesh.add(sender); // Add the person who just connected
+        
+        // Add all active call participants
+        currentActiveCalls.audio.forEach(user => this.groupCallMesh.add(user));
+        currentActiveCalls.video.forEach(user => this.groupCallMesh.add(user));
+        
+        // Also add all other active users in the room (they might not be connected yet)
+        activeUsers.forEach(user => {
+          if (user !== this.rtcClient.name) {
+            this.groupCallMesh.add(user);
+          }
+        });
+        
+        // Set group call type
+        this.groupCallType = callType;
+        
+        console.log(`Detected group call! Initialized mesh with ${this.groupCallMesh.size} participants:`, Array.from(this.groupCallMesh));
+        console.log(`Active users in room: ${activeUsers.length}, Active calls: ${totalActiveCalls}, Call type: ${callType}`);
+        
+        // CRITICAL: Connect ourselves to all other participants in the room
+        // This ensures that when B accepts A's call, B automatically calls C
+        // When C accepts A's call, C automatically calls B
+        // This creates the full mesh network
+        // Pass null as newParticipant since we're the one initiating the mesh connections
+        this._connectToOtherMeshParticipants(null);
+      }
+      
       // Start stats polling if not already started
       const activeCalls = this.callState.getActiveCalls();
       if (!this.statsInterval && (activeCalls.video.size > 0 || activeCalls.audio.size > 0)) {
         this._startStatsPolling();
       }
       
+      // Get shared local stream from RTC client (single source of truth)
+      const sharedLocalStream = this.rtcClient?.sharedLocalStream || localStream;
+      
       // Emit event
       this.emit('callconnected', {
         sender,
-        localStream,
+        localStream: sharedLocalStream,
         remoteStream,
         type: hasVideo ? 'video' : 'audio'
       });
       
       // Use stream displays if provided
       if (hasVideo && this.videoDisplay && typeof this.videoDisplay.setStreams === 'function') {
-        this.videoDisplay.setStreams(sender, { localStream, remoteStream });
+        this.videoDisplay.setStreams(sender, { localStream: sharedLocalStream, remoteStream });
       } else if (hasAudio && this.audioDisplay && typeof this.audioDisplay.setStreams === 'function') {
-        this.audioDisplay.setStreams(sender, { localStream, remoteStream });
+        this.audioDisplay.setStreams(sender, { localStream: sharedLocalStream, remoteStream });
       }
+    }
+    
+    /**
+     * Connect to all other participants in the group call mesh
+     * This creates the full mesh network - everyone connects to everyone
+     * @param {string} newParticipant - The participant who just joined (or null if we're initiating)
+     * @private
+     */
+    async _connectToOtherMeshParticipants(newParticipant) {
+      if (!this.groupCallType) {
+        console.warn('_connectToOtherMeshParticipants called but no groupCallType set');
+        return;
+      }
+      
+      const activeCalls = this.callState.getActiveCalls();
+      const allActiveParticipants = new Set([
+        ...activeCalls.audio,
+        ...activeCalls.video
+      ]);
+      
+      // Build list of users we should connect to: anyone in the mesh OR currently active in the room
+      const roomParticipants = this._getActiveUsers();
+      const meshParticipants = Array.from(this.groupCallMesh || []);
+      const potentialParticipants = new Set([
+        ...roomParticipants,
+        ...meshParticipants
+      ]);
+      
+      const otherParticipants = Array.from(potentialParticipants).filter(user => {
+        if (!user) return false;
+        if (user === this.rtcClient?.name) return false; // Never call ourselves
+        if (newParticipant && user === newParticipant) return false; // Skip the participant we just connected with
+        return !allActiveParticipants.has(user); // Skip if we already have an active connection
+      });
+      
+      if (otherParticipants.length === 0) {
+        console.log('No other participants to connect to in mesh');
+        return;
+      }
+      
+      console.log(`${newParticipant || 'We'} joining group call. Connecting to other participants:`, otherParticipants);
+      console.log(`Current active participants:`, Array.from(allActiveParticipants));
+      console.log(`Group call mesh:`, Array.from(this.groupCallMesh));
+      
+      // Call all other participants in parallel
+      const callInfo = this.groupCallType === 'audio' 
+        ? { video: false, audio: true }
+        : { video: true, audio: true };
+      
+      const connectionPromises = otherParticipants.map(async (participant) => {
+        // Check current state for this participant
+        const isAlreadyConnected = allActiveParticipants.has(participant);
+        const isPending = this.pendingCalls.has(participant);
+        const isOutgoing = this.outgoingCalls.has(participant);
+        
+        if (isAlreadyConnected) {
+          console.log(`Skipping ${participant} - already connected`);
+          return { participant, skipped: true };
+        }
+        
+        // If we have stale pending/outgoing entries (for example from a previous attempt),
+        // clear them so we can safely retry the connection.
+        if (isPending) {
+          console.log(`Clearing stale pending call for ${participant} before reconnecting`);
+          const pending = this.pendingCalls.get(participant);
+          if (pending?.timeoutId) {
+            clearTimeout(pending.timeoutId);
+          }
+          this.pendingCalls.delete(participant);
+        }
+        
+        if (isOutgoing) {
+          console.log(`Cancelling stale outgoing call for ${participant} before reconnecting`);
+          const outgoing = this.outgoingCalls.get(participant);
+          if (outgoing?.timeoutId) {
+            clearTimeout(outgoing.timeoutId);
+          }
+          this.outgoingCalls.delete(participant);
+        }
+        
+        try {
+          console.log(`Auto-connecting to ${participant} in mesh (from ${newParticipant || 'initiator'})`);
+          const { start, end } = this.rtcClient.callUser(participant, callInfo);
+          
+          // Track as automatic mesh connection
+          this.outgoingCalls.set(participant, {
+            type: this.groupCallType,
+            cancelFn: null,
+            timeoutId: null,
+            isMeshConnection: true
+          });
+          
+          // Wait for connection
+          const streamResult = await start;
+          if (streamResult && (streamResult.localStream || streamResult.remoteStream)) {
+            this._handleCallConnected(participant, streamResult);
+          }
+          return { participant, success: true };
+        } catch (err) {
+          console.warn(`Failed to auto-connect to ${participant}:`, err);
+          this.outgoingCalls.delete(participant);
+          return { participant, success: false, error: err };
+        }
+      });
+      
+      // Wait for all connections (but don't fail if some fail)
+      const results = await Promise.allSettled(connectionPromises);
+      const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
+      console.log(`Mesh connection: ${successful}/${otherParticipants.length} successful`);
     }
 
     /**
-     * Handle call ended event
+     * Handle call ended event from receiving "callended" message
+     * Only ends the specific call, keeps other connections active
      * @param {string} peerName - Name of the peer
      * @private
      */
     _handleCallEnded(peerName) {
-      console.log("CallManager._handleCallEnded: Called for " + peerName);
+      console.log("CallManager._handleCallEnded: Called for " + peerName + " (receiver side - only end this call)");
       // Check if call is already ended (idempotent)
       const currentState = this.callState.getUserState(peerName);
       if (currentState && currentState.status === 'inactive') {
@@ -2999,92 +3504,29 @@ var RTChat = (function (exports) {
         return;
       }
       
-      // CRITICAL: Collect all users with active/pending calls BEFORE updating any state
-      // This ensures we get the complete list of all calls that need to be ended
-      const activeCallsBefore = this.callState.getActiveCalls();
-      const pendingCallsBefore = this.callState.getPendingCalls();
-      const allUsersToEnd = new Set([
-        ...activeCallsBefore.audio,
-        ...activeCallsBefore.video,
-        ...pendingCallsBefore,
-        ...this.outgoingCalls.keys()
-      ]);
+      // Only finalize THIS specific call (receiver side)
+      this._finalizeCallClosure(peerName);
       
-      console.log("CallManager._handleCallEnded: Found calls to end:", {
-        activeAudio: Array.from(activeCallsBefore.audio),
-        activeVideo: Array.from(activeCallsBefore.video),
-        pending: Array.from(pendingCallsBefore),
-        outgoing: Array.from(this.outgoingCalls.keys()),
-        allUsersToEnd: Array.from(allUsersToEnd)
+      // Check if there are any remaining active calls after closing this one
+      const remainingActiveCalls = this.callState.getActiveCalls();
+      const hasRemainingCalls = remainingActiveCalls.audio.size > 0 || remainingActiveCalls.video.size > 0;
+      
+      console.log("CallManager._handleCallEnded: After ending " + peerName + ", remaining calls:", {
+        audio: Array.from(remainingActiveCalls.audio),
+        video: Array.from(remainingActiveCalls.video),
+        hasRemainingCalls
       });
       
-      // Clear timeouts for the primary peer
-      const pendingCall = this.pendingCalls.get(peerName);
-      if (pendingCall && pendingCall.timeoutId) {
-        clearTimeout(pendingCall.timeoutId);
+      // Only stop stats polling if no calls remain
+      // Note: RTC layer handles closing streams/stopping tracks
+      if (!hasRemainingCalls) {
+        this._stopStatsPolling();
+        this.groupCallMesh.clear();
+        this.groupCallType = null;
+        console.log("CallManager._handleCallEnded: No remaining calls, released all resources");
+      } else {
+        console.log("CallManager._handleCallEnded: Other calls still active, keeping resources");
       }
-      this.pendingCalls.delete(peerName);
-      
-      const outgoingCall = this.outgoingCalls.get(peerName);
-      if (outgoingCall && outgoingCall.timeoutId) {
-        clearTimeout(outgoingCall.timeoutId);
-      }
-      this.outgoingCalls.delete(peerName);
-      
-      // Update unified call state for the primary peer
-      this.callState.setUserState(peerName, {
-        status: 'inactive',
-        audio: false,
-        video: false
-      });
-      
-      this.localStreams.delete(peerName);
-      this.latencyMetrics.delete(peerName);
-      
-      // CRITICAL: Emit callended event for the primary call - this must always happen
-      this.emit('callended', { peerName });
-      
-      // End all other remaining calls (excluding the one we just ended)
-      for (const otherUser of allUsersToEnd) {
-        if (otherUser !== peerName) {
-          // End call with RTC client to send message
-          if (this.rtcClient && this.rtcClient.endCallWithUser) {
-            try {
-              this.rtcClient.endCallWithUser(otherUser);
-            } catch (err) {
-              console.warn(`Error ending call with ${otherUser}:`, err);
-            }
-          }
-          
-          // Update state for other user
-          const otherPendingCall = this.pendingCalls.get(otherUser);
-          if (otherPendingCall && otherPendingCall.timeoutId) {
-            clearTimeout(otherPendingCall.timeoutId);
-          }
-          this.pendingCalls.delete(otherUser);
-          
-          const otherOutgoingCall = this.outgoingCalls.get(otherUser);
-          if (otherOutgoingCall && otherOutgoingCall.timeoutId) {
-            clearTimeout(otherOutgoingCall.timeoutId);
-          }
-          this.outgoingCalls.delete(otherUser);
-          
-          this.callState.setUserState(otherUser, {
-            status: 'inactive',
-            audio: false,
-            video: false
-          });
-          this.localStreams.delete(otherUser);
-          this.latencyMetrics.delete(otherUser);
-          
-          // CRITICAL: Emit callended event for each other user
-          this.emit('callended', { peerName: otherUser });
-        }
-      }
-      
-      // Stop stats polling and reset mute states (all calls are now ended)
-      this._stopStatsPolling();
-      this.muteState = { mic: false, speakers: false, video: false };
     }
 
     /**
@@ -3094,6 +3536,9 @@ var RTChat = (function (exports) {
      * @private
      */
     _handleCallTimeout(peerName, direction) {
+      const pendingCall = this.pendingCalls.get(peerName);
+      const wasAutoAccepted = pendingCall?.autoAccepted;
+      
       // Stop ringing if ringer is provided
       if (this.ringer && typeof this.ringer.stop === 'function') {
         this.ringer.stop();
@@ -3108,14 +3553,26 @@ var RTChat = (function (exports) {
         }
       }
       
-      // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
-      this._handleCallEnded(peerName);
+      // Finalize only this specific call
+      this._finalizeCallClosure(peerName);
+      
+      // Check if there are any remaining active calls
+      const remainingActiveCalls = this.callState.getActiveCalls();
+      const hasRemainingCalls = remainingActiveCalls.audio.size > 0 || remainingActiveCalls.video.size > 0;
+      
+      // Only release resources if no calls remain
+      // Note: RTC layer handles closing streams/stopping tracks
+      if (!hasRemainingCalls) {
+        this._stopStatsPolling();
+        this.groupCallMesh.clear();
+        this.groupCallType = null;
+      }
       
       // Emit timeout event for UI notifications
       this.emit('calltimeout', { peerName, direction });
       
-      // Use callUI if provided
-      if (this.callUI && typeof this.callUI.showMissedCallNotification === 'function') {
+      // Use callUI if provided (skip notifications for auto-accepted mesh calls)
+      if (!wasAutoAccepted && this.callUI && typeof this.callUI.showMissedCallNotification === 'function') {
         this.callUI.showMissedCallNotification(peerName, direction);
       }
       
@@ -3148,8 +3605,409 @@ var RTChat = (function (exports) {
           }
         }
         
-        this._handleCallEnded(user);
+        // Finalize only this specific call
+        this._finalizeCallClosure(user);
+        
+        // Check if there are any remaining active calls
+        const remainingActiveCalls = this.callState.getActiveCalls();
+        const hasRemainingCalls = remainingActiveCalls.audio.size > 0 || remainingActiveCalls.video.size > 0;
+        
+        // Only release resources if no calls remain
+        // Note: RTC layer handles closing streams/stopping tracks
+        if (!hasRemainingCalls) {
+          this._stopStatsPolling();
+          this.groupCallMesh.clear();
+          this.groupCallType = null;
+        }
       }
+    }
+
+    /**
+     * Log all active tracks and their dependent streams
+     * Single source of truth: rtcClient.rtcConnections
+     * @private
+     */
+    _logActiveTracksAndStreams() {
+      console.log("=== ACTIVE TRACKS AND STREAMS (Single Source: rtcConnections) ===");
+      
+      const allTracks = new Map(); // track.id -> {track, owners: []}
+      
+      // Collect from rtcConnections ONLY (single source of truth)
+      if (this.rtcClient && this.rtcClient.rtcConnections) {
+        for (const [user, conn] of Object.entries(this.rtcClient.rtcConnections)) {
+          if (conn && conn.localStream && conn.localStream.getTracks) {
+            conn.localStream.getTracks().forEach(track => {
+              if (!allTracks.has(track.id)) {
+                allTracks.set(track.id, { track, owners: [] });
+              }
+              allTracks.get(track.id).owners.push(user);
+            });
+          }
+        }
+      }
+      
+      console.log(`Total unique tracks: ${allTracks.size}`);
+      for (const [trackId, {track, owners}] of allTracks.entries()) {
+        console.log(`  Track ${track.kind} ${trackId.substring(0, 8)}... (readyState: ${track.readyState})`);
+        console.log(`    - Used by rtcConnections: [${owners.join(', ')}]`);
+      }
+      console.log("==================================================================");
+    }
+
+    /**
+     * Close a stream properly: stop its tracks only if not shared by other streams
+     * CRITICAL: This is the ONLY method that should stop tracks
+     * Single source of truth: rtcClient.rtcConnections
+     * @param {MediaStream} stream - Stream to close
+     * @param {string} streamOwner - Owner identifier (for checking if track is shared)
+     * @private
+     */
+    _closeStream(stream, streamOwner) {
+      if (!stream || typeof stream.getTracks !== 'function') {
+        console.warn(`_closeStream: Invalid stream for ${streamOwner}`);
+        return;
+      }
+      
+      const tracks = stream.getTracks();
+      console.log(`_closeStream: Closing stream for ${streamOwner} with ${tracks.length} track(s)`);
+      
+      tracks.forEach(track => {
+        // Check if ANY other RTC connection uses this track (single source of truth)
+        let trackShared = false;
+        
+        if (this.rtcClient && this.rtcClient.rtcConnections) {
+          for (const [user, conn] of Object.entries(this.rtcClient.rtcConnections)) {
+            if (user === streamOwner) continue; // Skip the connection we're closing
+            if (conn && conn.localStream && conn.localStream.getTracks) {
+              if (conn.localStream.getTracks().some(t => t.id === track.id)) {
+                trackShared = true;
+                console.log(`_closeStream: Track ${track.kind} ${track.id.substring(0,8)}... is shared with rtcConnection[${user}]`);
+                break;
+              }
+            }
+          }
+        }
+        
+        // Only stop track if NOT shared
+        if (!trackShared) {
+          console.log(`_closeStream: Stopping ${track.kind} track ${track.id.substring(0,8)}... (readyState: ${track.readyState})`);
+          try {
+            track.stop();
+            console.log(`_closeStream: Stopped track (new readyState: ${track.readyState})`);
+          } catch (err) {
+            console.warn(`_closeStream: Failed to stop track:`, err);
+          }
+        } else {
+          console.log(`_closeStream: Keeping ${track.kind} track ${track.id.substring(0,8)}... alive (shared)`);
+        }
+      });
+      
+      // Log state after closing
+      this._logActiveTracksAndStreams();
+    }
+
+    /**
+     * Close the stream for a specific RTC connection
+     * Single source of truth: rtcClient.rtcConnections[user].localStream
+     * @param {string} user - User identifier
+     * @private
+     */
+    _releaseLocalStreamForUser(user) {
+      console.log(`_releaseLocalStreamForUser: Closing stream for ${user}`);
+      this._logActiveTracksAndStreams();
+      
+      if (!this.rtcClient || !this.rtcClient.rtcConnections || !this.rtcClient.rtcConnections[user]) {
+        console.log(`_releaseLocalStreamForUser: No RTC connection for ${user}`);
+        return;
+      }
+      
+      const conn = this.rtcClient.rtcConnections[user];
+      const stream = conn.localStream;
+      
+      if (!stream) {
+        console.log(`_releaseLocalStreamForUser: No localStream in connection for ${user}`);
+        return;
+      }
+      
+      // Remove from connection BEFORE closing (so _closeStream doesn't see it when checking)
+      conn.localStream = null;
+      
+      // Close the stream (will check if tracks are shared and stop accordingly)
+      this._closeStream(stream, user);
+    }
+
+    /**
+     * Fully tear down local bookkeeping for a peer that has ended
+     * @param {string} user
+     * @private
+     */
+    _finalizeCallClosure(user) {
+      if (!user) {
+        return;
+      }
+      
+      // Clear pending call timeouts
+      const pendingCall = this.pendingCalls.get(user);
+      if (pendingCall && pendingCall.timeoutId) {
+        clearTimeout(pendingCall.timeoutId);
+      }
+      this.pendingCalls.delete(user);
+      
+      // Clear outgoing call timeouts
+      const outgoingCall = this.outgoingCalls.get(user);
+      if (outgoingCall && outgoingCall.timeoutId) {
+        clearTimeout(outgoingCall.timeoutId);
+      }
+      this.outgoingCalls.delete(user);
+      
+      // Reset unified call state
+      this.callState.setUserState(user, {
+        status: 'inactive',
+        audio: false,
+        video: false
+      });
+      
+      // Note: RTC layer handles closing streams/stopping tracks via endCallWithUser
+      this.latencyMetrics.delete(user);
+      
+      // Remove from group call mesh (and clear when empty)
+      if (this.groupCallMesh.has(user)) {
+        this.groupCallMesh.delete(user);
+        console.log(`Removed ${user} from group call mesh. Remaining:`, Array.from(this.groupCallMesh));
+        if (this.groupCallMesh.size <= 1) {
+          this.groupCallMesh.clear();
+          this.groupCallType = null;
+          console.log('Group call mesh cleared - no more participants');
+        }
+      }
+      
+      // Notify UI layers that this peer is gone
+      this.emit('callended', { peerName: user });
+    }
+
+    /**
+     * Close all streams from RTC connections
+     * Single source of truth: rtcClient.rtcConnections
+     * @private
+     */
+    _releaseAllLocalStreams() {
+      console.log(`_releaseAllLocalStreams: Closing all RTC connection streams`);
+      
+      if (!this.rtcClient || !this.rtcClient.rtcConnections) {
+        console.log(`_releaseAllLocalStreams: No RTC connections`);
+        return;
+      }
+      
+      // Get all users with connections
+      const users = Object.keys(this.rtcClient.rtcConnections);
+      console.log(`_releaseAllLocalStreams: Found ${users.length} connections`);
+      
+      // Close each stream individually
+      for (const user of users) {
+        this._releaseLocalStreamForUser(user);
+      }
+    }
+
+    /**
+     * Get list of active users (connected peers)
+     * @returns {Array<string>} Array of user names
+     * @private
+     */
+    _getActiveUsers() {
+      let users = [];
+      
+      // Try to get from chatManager first
+      if (this.chatManager && typeof this.chatManager.getActiveUsers === 'function') {
+        users = this.chatManager.getActiveUsers();
+        console.log('Got active users from chatManager:', users);
+        return users;
+      }
+      
+      // Fallback to rtcClient connectedUsers
+      if (this.rtcClient && this.rtcClient.connectedUsers) {
+        const connected = this.rtcClient.connectedUsers;
+        users = Array.isArray(connected) ? connected : [];
+        console.log('Got active users from rtcClient.connectedUsers:', users);
+        return users;
+      }
+      
+      // Last resort: get from rtcConnections
+      if (this.rtcClient && this.rtcClient.rtcConnections) {
+        users = Object.keys(this.rtcClient.rtcConnections).filter(user => {
+          const conn = this.rtcClient.rtcConnections[user];
+          return conn && conn.peerConnection && 
+                 (conn.peerConnection.connectionState === 'connected' || 
+                  conn.peerConnection.connectionState === 'completed');
+        });
+        console.log('Got active users from rtcConnections:', users);
+        return users;
+      }
+      
+      console.warn('No active users found!');
+      return [];
+    }
+
+    /**
+     * Start a group call with multiple users - creates a full mesh network
+     * @param {string|Array<string>} users - 'all' to call all active users, or array of user names
+     * @param {string} type - 'audio' or 'video'
+     * @returns {Promise} Promise that resolves with results for all calls
+     */
+    async startGroupCall(users, type) {
+      if (!this.rtcClient || !this.rtcClient.callUser) {
+        throw new Error('RTC client not available or does not support callUser');
+      }
+      
+      // Get target users
+      let targetUsers;
+      if (users === 'all') {
+        targetUsers = this._getActiveUsers();
+        console.log('startGroupCall: Got active users for "all":', targetUsers);
+      } else if (Array.isArray(users)) {
+        targetUsers = users;
+        console.log('startGroupCall: Using provided user array:', targetUsers);
+      } else {
+        // Single user - convert to array
+        targetUsers = [users];
+        console.log('startGroupCall: Single user converted to array:', targetUsers);
+      }
+      
+      if (targetUsers.length === 0) {
+        console.error('startGroupCall: No users to call!');
+        throw new Error('No users to call');
+      }
+      
+      console.log(`startGroupCall: Will call ${targetUsers.length} users:`, targetUsers);
+      
+      // Filter out users we're already calling
+      const activeCalls = this.callState.getActiveCalls();
+      const pendingCalls = this.callState.getPendingCalls();
+      const alreadyInCall = new Set([
+        ...activeCalls.audio,
+        ...activeCalls.video,
+        ...pendingCalls,
+        ...this.outgoingCalls.keys()
+      ]);
+      
+      targetUsers = targetUsers.filter(user => !alreadyInCall.has(user));
+      
+      if (targetUsers.length === 0) {
+        throw new Error('All selected users are already in a call');
+      }
+      
+      // Initialize group call mesh - add ourselves and all target users
+      this.groupCallMesh.clear();
+      this.groupCallMesh.add(this.rtcClient.name); // Add ourselves
+      targetUsers.forEach(user => this.groupCallMesh.add(user));
+      this.groupCallType = type;
+      
+      console.log(`Starting group ${type} call mesh with ${targetUsers.length} users:`, targetUsers);
+      console.log('Group call mesh participants:', Array.from(this.groupCallMesh));
+      
+      const callInfo = type === 'audio' 
+        ? { video: false, audio: true }
+        : { video: true, audio: true };
+      
+      console.log(`Calling ${targetUsers.length} users simultaneously:`, targetUsers);
+      
+      // Start calls to all users in parallel - call RTC client directly
+      // When each user accepts, they will automatically connect to all other participants
+      const callPromises = targetUsers.map(async (user) => {
+        try {
+          console.log(`Initiating call to ${user}...`);
+          
+          // Track as outgoing call
+          const timeoutId = setTimeout(() => {
+            this._handleCallTimeout(user, 'outgoing');
+          }, this.options.callTimeout);
+          
+          this.outgoingCalls.set(user, {
+            type,
+            cancelFn: null,
+            timeoutId,
+            isMeshConnection: false
+          });
+          
+          // Call RTC client directly (bypass startCall to avoid single-call assumptions)
+          const { start, end } = this.rtcClient.callUser(user, callInfo);
+          
+          // Await the start promise to get the streams
+          const streamResult = await start;
+          
+          // Clear timeout if call started successfully
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+          
+          // If streamResult contains streams, handle them
+          if (streamResult && (streamResult.localStream || streamResult.remoteStream)) {
+            this._handleCallConnected(user, streamResult);
+          }
+          
+          // Emit event
+          this.emit('callstarted', { user, type });
+          
+          console.log(`Successfully called ${user}`);
+          return { user, success: true, result: { ...streamResult, end } };
+        } catch (err) {
+          console.error(`Failed to call ${user}:`, err);
+          
+          // Clear timeout
+          const outgoingCall = this.outgoingCalls.get(user);
+          if (outgoingCall && outgoingCall.timeoutId) {
+            clearTimeout(outgoingCall.timeoutId);
+          }
+          this.outgoingCalls.delete(user);
+          
+          // Remove from mesh if call failed
+          this.groupCallMesh.delete(user);
+          
+          // Check if call was rejected
+          if (err === "Call rejected" || err?.message === "Call rejected") {
+            this._handleCallEnded(user);
+            this.emit('callrejected', { user });
+          } else {
+            this._handleCallEnded(user);
+            this.emit('callerror', { user, error: err });
+          }
+          
+          // Don't end other calls if one fails
+          return { user, success: false, error: err };
+        }
+      });
+      
+      const results = await Promise.allSettled(callPromises);
+      
+      // Process results
+      const successful = [];
+      const failed = [];
+      
+      results.forEach((result, index) => {
+        if (result.status === 'fulfilled' && result.value.success) {
+          successful.push(result.value.user);
+        } else {
+          failed.push({
+            user: targetUsers[index],
+            error: result.status === 'fulfilled' ? result.value.error : result.reason
+          });
+          this.groupCallMesh.delete(targetUsers[index]);
+        }
+      });
+      
+      // Emit group call event
+      this.emit('groupcallstarted', { 
+        users: targetUsers, 
+        type, 
+        successful,
+        failed,
+        results 
+      });
+      
+      return {
+        successful,
+        failed,
+        total: targetUsers.length
+      };
     }
 
     /**
@@ -3229,11 +4087,11 @@ var RTChat = (function (exports) {
         
         // Check if call was rejected
         if (err === "Call rejected" || err?.message === "Call rejected") {
-          // CRITICAL: When call is rejected, end ALL calls and emit events
+          // Only end this specific call, not all calls
           this._handleCallEnded(user);
           this.emit('callrejected', { user });
         } else {
-          // For other errors, also end all calls to ensure clean state
+          // For other errors, only end this specific call
           this._handleCallEnded(user);
           this.emit('callerror', { user, error: err });
         }
@@ -3244,11 +4102,14 @@ var RTChat = (function (exports) {
 
     /**
      * End a call with a user
+     * This ends the specific call and sends "endcall" message to peer
+     * Note: For ending all calls (button click), use endAllCalls() instead
      * @param {string} user - Name of the user
      */
     endCall(user) {
-      // First, tell RTC client to end the call and send "endcall" message to peer
-      // This must happen while the call is still active so the message can be sent
+      console.log("CallManager.endCall: Ending call with " + user);
+      
+      // Tell RTC client to end the call and send "endcall" message to peer
       if (this.rtcClient && this.rtcClient.endCallWithUser) {
         try {
           this.rtcClient.endCallWithUser(user);
@@ -3257,21 +4118,52 @@ var RTChat = (function (exports) {
         }
       }
       
-      // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
-      // This ensures when any call ends, all other calls are also ended
-      this._handleCallEnded(user);
+      // Finalize this specific call locally
+      this._finalizeCallClosure(user);
+      
+      // Check if there are any remaining active calls
+      const remainingActiveCalls = this.callState.getActiveCalls();
+      const hasRemainingCalls = remainingActiveCalls.audio.size > 0 || remainingActiveCalls.video.size > 0;
+      
+      // Only stop stats polling if no calls remain
+      // Note: RTC layer handles closing streams/stopping tracks
+      if (!hasRemainingCalls) {
+        this._stopStatsPolling();
+        this.groupCallMesh.clear();
+        this.groupCallType = null;
+        console.log("CallManager.endCall: No remaining calls, released all resources");
+      } else {
+        console.log("CallManager.endCall: Other calls still active, keeping resources");
+      }
     }
 
     /**
-     * End all active calls
+     * End all active calls (initiator side - button click)
+     * Delegates to RTC layer which handles streams and tracks
      */
     endAllCalls() {
+      console.log("CallManager.endAllCalls: Ending ALL calls");
+      
+      // Get users from call state
       const activeCalls = this.callState.getActiveCalls();
       const pendingCalls = this.callState.getPendingCalls();
       const allUsers = new Set([...activeCalls.video, ...activeCalls.audio, ...pendingCalls, ...this.outgoingCalls.keys()]);
+      
+      // ALSO get users from rtcConnections (source of truth for actual connections)
+      if (this.rtcClient && this.rtcClient.rtcConnections) {
+        for (const user of Object.keys(this.rtcClient.rtcConnections)) {
+          allUsers.add(user);
+        }
+      }
+      
+      console.log("CallManager.endAllCalls: All users to end:", Array.from(allUsers));
+      
+      // Delegate to RTC client to end calls (it handles streams/tracks)
       for (const user of allUsers) {
         this.endCall(user);
       }
+      
+      console.log("CallManager.endAllCalls: Complete");
     }
 
     /**
@@ -3529,9 +4421,9 @@ var RTChat = (function (exports) {
       this.endAllCalls();
       
       // Clear all state
+      // Note: RTC layer handles closing streams/stopping tracks
       this.pendingCalls.clear();
       this.outgoingCalls.clear();
-      this.localStreams.clear();
       this.latencyMetrics.clear();
       
       // Clear unified call state
@@ -3620,6 +4512,7 @@ var RTChat = (function (exports) {
       // Setup RTC client event listeners if available
       if (rtcClient) {
         this._setupRTCEventListeners();
+        this._hydrateActiveUsersFromClient();
       }
     }
 
@@ -3635,9 +4528,7 @@ var RTChat = (function (exports) {
         // For SignedMQTTRTCClient, we should wait for validation before adding users
         // For regular MQTTRTCClient, we can add users immediately on connectedtopeer
         // Detection: check if validatedPeers property exists (more reliable than constructor.name)
-        const isSignedClient = this.rtcClient && 
-                              (this.rtcClient.validatedPeers !== undefined || 
-                               (this.rtcClient.on && typeof this.rtcClient.on === 'function'));
+        const isSignedClient = this.rtcClient && Array.isArray(this.rtcClient.validatedPeers);
         
         // Also check if validation event is available by trying to listen
         // For now, we'll listen to both events and handle appropriately
@@ -3669,6 +4560,44 @@ var RTChat = (function (exports) {
         });
         
         this.rtcClient.on('disconnectedfrompeer', this._handleUserDisconnected);
+      }
+    }
+
+    /**
+     * Ensure previously validated/connected peers are reflected in activeUsers.
+     * Without this, users validated before ChatManager initializes would never appear active.
+     * @private
+     */
+    _hydrateActiveUsersFromClient() {
+      if (!this.rtcClient) {
+        return;
+      }
+      
+      // Signed clients expose validatedPeers
+      if (Array.isArray(this.rtcClient.validatedPeers)) {
+        this.rtcClient.validatedPeers.forEach((peerName) => {
+          if (peerName && !this.activeUsers.includes(peerName)) {
+            console.log('ChatManager: Hydrating validated peer', peerName);
+            this._handleUserConnected(peerName);
+          }
+        });
+      } else {
+        // Fallback for non-signed clients
+        let connected = null;
+        if (typeof this.rtcClient.connectedUsers === 'function') {
+          connected = this.rtcClient.connectedUsers();
+        } else if (Array.isArray(this.rtcClient.connectedUsers)) {
+          connected = this.rtcClient.connectedUsers;
+        }
+        
+        if (Array.isArray(connected) && connected.length) {
+          connected.forEach((peerName) => {
+            if (peerName && !this.activeUsers.includes(peerName)) {
+              console.log('ChatManager: Hydrating connected peer', peerName);
+              this._handleUserConnected(peerName);
+            }
+          });
+        }
       }
     }
 
@@ -4306,6 +5235,15 @@ var RTChat = (function (exports) {
     }
     
     _setupEventListeners() {
+      // Header click to toggle collapse/expand
+      const chatHeader = this.queryRoot('.chat-header');
+      if (chatHeader) {
+        chatHeader.addEventListener('click', (e) => {
+          // Only trigger toggle if clicking the header itself, not its interactive children
+          this.dispatchCustomEvent('togglecollapse');
+        });
+      }
+      
       // Room name editing
       if (this.roomName) {
         if (this.getConfig('allowRoomChange')) {
@@ -5323,12 +6261,14 @@ var RTChat = (function (exports) {
       #chat-room { width: 200px; }
       #chat-name { width: 200px; }
       #chat-video {
-          max-height: 40vh;
-          overflow: auto;
-          display: none;
-          padding: 10px;
-        }
-      #chat-video.visible { display: block; }
+        max-height: 40vh;
+        overflow: auto;
+        display: none;
+        padding: 10px;
+      }
+      #chat-video.visible {
+        display: grid;
+      }
       #chat-audio {
         max-height: 20vh;
         overflow: auto;
@@ -5395,17 +6335,6 @@ var RTChat = (function (exports) {
         display: block;
       }
       .video-stream-remote { width: 100%; }
-      .video-stream-local {
-        position: absolute;
-        width: 25%;
-        max-width: 25%;
-        top: 10px;
-        right: 10px;
-        border: 2px solid white;
-        box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
-        border-radius: 5px;
-        background: #000;
-      }
       #chat-body {
         max-height: 40vh;
         overflow: auto;
@@ -5661,6 +6590,10 @@ var RTChat = (function (exports) {
             this.name = newName;
           }
         });
+        
+        this.chatHeaderComponent.addEventListener('togglecollapse', () => {
+          this._toggleCollapse();
+        });
       }
       
       // MessageInput events
@@ -5806,6 +6739,46 @@ var RTChat = (function (exports) {
     _setupCallButtons() {
       // Call buttons are now handled by MessageInput component
       // Event listeners are set up in _setupComponentEventListeners()
+    }
+
+    /**
+     * Toggle the chat body collapsed/expanded state
+     * @private
+     */
+    _toggleCollapse() {
+      if (this.chatBody) {
+        const isCurrentlyVisible = this.chatBody.classList.contains('visible');
+        
+        if (isCurrentlyVisible) {
+          // Collapse: hide chat body, call management, video, and audio
+          this.chatBody.classList.remove('visible');
+          if (this.callManagementContainer) {
+            this.callManagementContainer.style.display = 'none';
+          }
+          if (this.chatVideo) {
+            this.chatVideo.style.display = 'none';
+          }
+          if (this.chatAudio) {
+            this.chatAudio.style.display = 'none';
+          }
+        } else {
+          // Expand: show chat body and restore call management/media visibility
+          this.chatBody.classList.add('visible');
+          if (this.callManagementContainer) {
+            // Restore call management visibility based on whether it should be active
+            const hasActiveCalls = this.callManagementContainer.classList.contains('active');
+            this.callManagementContainer.style.display = hasActiveCalls ? 'flex' : 'none';
+          }
+          if (this.chatVideo) {
+            // Restore video display (it manages its own visibility based on active streams)
+            this.chatVideo.style.display = '';
+          }
+          if (this.chatAudio) {
+            // Restore audio display (it manages its own visibility based on active streams)
+            this.chatAudio.style.display = '';
+          }
+        }
+      }
     }
 
     /**
@@ -5971,12 +6944,38 @@ var RTChat = (function (exports) {
       // Show missed call message
       this._showMissedCallMessage(peerName, direction);
       
+      // Also show a chat message when the call is missed
+      // For incoming calls: show "You missed ${peerName}'s call"
+      // For outgoing calls: the notification already shows "${peerName} missed your call"
+      if (direction === 'incoming' && this.messagesComponent) {
+        const missedCallMessage = `You missed ${peerName}'s call`;
+        this.appendMessage({
+          data: missedCallMessage,
+          sender: 'System',
+          timestamp: Date.now(),
+          isOwn: false
+        });
+      }
+      
       // Clean up UI streams
       this.videoDisplay.removeStreams(peerName);
       this.audioDisplay.removeStreams(peerName);
       
+      // Get current state from CallManager (state is already updated when event fires)
+      const activeCalls = this.callManager ? this.callManager.getActiveCalls() : {audio: new Set(), video: new Set()};
+      const hasActiveCalls = activeCalls.video.size > 0 || activeCalls.audio.size > 0;
+      
+      // Reset call type
+      this.activeCallType = null;
+      
       // Update call controls
       this._updateCallControlsVisibility();
+      
+      // Update button states to reset cancel button back to inactive state
+      this._updateCallButtonStates(hasActiveCalls);
+      
+      // Update button visibility to restore start call buttons if no active calls
+      this._updateCallButtonVisibility();
     }
 
     /**
@@ -6068,43 +7067,37 @@ var RTChat = (function (exports) {
         this.videoCallButton.style.display = '';
       }
       
+      // Always show simple button text (group calls happen automatically when 2+ users)
+      if (this.audioCallButton) {
+        this.audioCallButton.textContent = 'Start Audio Call';
+      }
+      if (this.videoCallButton) {
+        this.videoCallButton.textContent = 'Start Video Call';
+      }
+      
       // Only show start call buttons if there are users AND no active calls AND no pending calls
       if (hasUsers && !hasActiveCalls && !hasPendingCalls) {
         if (modes === 'both') {
           if (this.audioCallButton) {
             this.audioCallButton.classList.add('visible');
-            // Verify after adding class
-            setTimeout(() => {
-              const computed = window.getComputedStyle(this.audioCallButton);
-              console.log('Audio button after visible class:', {
-                hasVisibleClass: this.audioCallButton.classList.contains('visible'),
-                computedDisplay: computed.display,
-                parentVisible: this.audioCallButton.parentElement ? window.getComputedStyle(this.audioCallButton.parentElement).display : 'N/A',
-                callManagementVisible: this.callManagementContainer ? !this.callManagementContainer.classList.contains('hidden') : false,
-                callManagementDisplay: this.callManagementContainer ? window.getComputedStyle(this.callManagementContainer).display : 'N/A'
-              });
-            }, 0);
           }
           if (this.videoCallButton) {
             this.videoCallButton.classList.add('visible');
-            console.log('Added visible class to video button');
           }
         } else if (modes === 'audio') {
           if (this.audioCallButton) {
             this.audioCallButton.classList.add('visible');
-            console.log('Added visible class to audio button');
           }
         } else if (modes === 'video') {
           if (this.videoCallButton) {
             this.videoCallButton.classList.add('visible');
-            console.log('Added visible class to video button');
           }
         }
       }
     }
 
     /**
-     * Start a call (audio or video)
+     * Start a call (audio or video) - automatically uses group calls when 3+ people
      * @param {string} type - 'audio' or 'video'
      * @private
      */
@@ -6125,30 +7118,60 @@ var RTChat = (function (exports) {
       }
 
       // Stop any ongoing ringing (in case we're calling while receiving)
-      this.ringer.stop();
+      if (this.ringer && typeof this.ringer.stop === 'function') {
+        this.ringer.stop();
+      }
 
-      // For now, call the first active user (could be enhanced to select user)
-      const targetUser = activeUsers[0];
-      console.log('Starting call to:', targetUser, 'type:', type);
-      
       // Track which button was clicked
       this.activeCallType = type;
       
-      // Update button states to show cancel button
-      this._updateCallButtonStates(true, type, true); // true = isOutgoing
+      // If there are 2+ other users, always use group call
+      // (1 other user = individual call, 2+ other users = group call)
+      const useGroupCall = activeUsers.length >= 2;
       
-      // Use CallManager to start the call
-      // CallManager will handle timeouts, stream management, and emit events
-      this.callManager.startCall(targetUser, type)
-        .then((result) => {
-          console.log('Call started successfully:', result);
-          // CallManager will handle the rest via events (callconnected, etc.)
-        })
-        .catch((err) => {
-          console.error('Error starting call:', err);
-          this.activeCallType = null;
-          this._updateCallButtonStates(false);
-        });
+      if (useGroupCall) {
+        // Group call with all active users
+        console.log(`Starting group ${type} call with ${activeUsers.length} users:`, activeUsers);
+        
+        // Update button states to show cancel button
+        this._updateCallButtonStates(true, type, true); // true = isOutgoing
+        
+        // Use CallManager to start the group call
+        this.callManager.startGroupCall('all', type)
+          .then((result) => {
+            console.log('Group call started successfully:', result);
+            console.log(`Successfully called ${result.successful.length} users, ${result.failed.length} failed`);
+            if (result.failed.length > 0) {
+              console.warn('Some calls failed:', result.failed);
+            }
+            // CallManager will handle the rest via events (callconnected, etc.)
+          })
+          .catch((err) => {
+            console.error('Error starting group call:', err);
+            this.activeCallType = null;
+            alert(`Failed to start group call: ${err.message || err}`);
+          });
+      } else {
+        // Individual call with first active user
+        const targetUser = activeUsers[0];
+        console.log('Starting individual call to:', targetUser, 'type:', type);
+        
+        // Update button states to show cancel button
+        this._updateCallButtonStates(true, type, true); // true = isOutgoing
+        
+        // Use CallManager to start the call
+        // CallManager will handle timeouts, stream management, and emit events
+        this.callManager.startCall(targetUser, type)
+          .then((result) => {
+            console.log('Call started successfully:', result);
+            // CallManager will handle the rest via events (callconnected, etc.)
+          })
+          .catch((err) => {
+            console.error('Error starting call:', err);
+            this.activeCallType = null;
+            this._updateCallButtonStates(false);
+          });
+      }
     }
 
     /**
@@ -6511,21 +7534,24 @@ var RTChat = (function (exports) {
         this.chatHeaderComponent.setRoomPrefix(prefix);
       }
       
-      // Initialize managers with RTC client (using config and this as UI interface)
-      this.callManager = new CallManager(rtc, { 
-        callTimeout: this.config.callTimeout,
-        callUI: this, // ChatBox implements CallUIInterface
-        videoDisplay: this.videoDisplay, // VideoStreamDisplay implements StreamDisplayInterface
-        audioDisplay: this.audioDisplay, // AudioStreamDisplay implements StreamDisplayInterface
-        ringer: this.ringer, // CallRinger implements RingerInterface
-        notifications: this.notificationSound // NotificationSound implements NotificationInterface
-      });
+      // Initialize ChatManager first (needed by CallManager)
       this.chatManager = new ChatManager(rtc, {
         name: this.name,
         primaryUserColor: this.config.primaryUserColor,
         userColors: [...this.config.userColors],
         chatUI: this, // ChatBox implements ChatUIInterface
         notifications: this.notificationSound // NotificationSound implements NotificationInterface
+      });
+      
+      // Initialize CallManager with chatManager reference for group calls
+      this.callManager = new CallManager(rtc, { 
+        callTimeout: this.config.callTimeout,
+        callUI: this, // ChatBox implements CallUIInterface
+        videoDisplay: this.videoDisplay, // VideoStreamDisplay implements StreamDisplayInterface
+        audioDisplay: this.audioDisplay, // AudioStreamDisplay implements StreamDisplayInterface
+        ringer: this.ringer, // CallRinger implements RingerInterface
+        notifications: this.notificationSound, // NotificationSound implements NotificationInterface
+        chatManager: this.chatManager // Pass chatManager for getting active users
       });
       
       // Initialize CallManagement with CallManager
@@ -7379,8 +8405,9 @@ var RTChat = (function (exports) {
          * - Default: Public cloud.shiftr.io broker (no auth required)
          * - Only used briefly for signaling, then direct WebRTC takes over
          */
-        broker: 'wss://public:public@public.cloud.shiftr.io',
-        
+        broker: 'wss://broker.emqx.io:8084/mqtt',
+        // broker: 'wss://public:public@public.cloud.shiftr.io',
+
         /**
          * MQTT client ID
          * - Unique identifier for this MQTT connection
@@ -7461,7 +8488,18 @@ var RTChat = (function (exports) {
          * - 'require': Require RTCP muxing (recommended, more efficient)
          * - 'negotiate': Allow non-muxed RTCP (for compatibility with older implementations)
          */
-        rtcpMuxPolicy: 'require'
+        rtcpMuxPolicy: 'require',
+        
+        /**
+         * Wait for answer timeout (milliseconds)
+         * - Maximum time to wait for peer to initiate connection
+         * - If peer doesn't initiate within this time, we initiate instead
+         * - Lower values = faster fallback but may cause connection conflicts
+         * - Higher values = more patient waiting but slower connection establishment
+         * - Default: 12000ms (12 seconds)
+         * - Recommended range: 3000-15000ms
+         */
+        waitForAnswerTimeout: 1000
       },
       
       // ============================================================================
@@ -8092,7 +9130,159 @@ var RTChat = (function (exports) {
       this.config = config;
       this.tabID = null;
       this.interval = null;
+      this.reinitializing = false;
+      this.instanceToken = this._generateRandomToken();
+      this.writeCounter = 0;
       this.initialize();
+    }
+    
+    /**
+     * Generate a random token for identifying writers/instances.
+     */
+    _generateRandomToken() {
+      if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+        return crypto.randomUUID();
+      }
+      return (
+        Math.random().toString(36).slice(2) +
+        Date.now().toString(36) +
+        Math.random().toString(36).slice(2)
+      );
+    }
+    
+    /**
+     * Generate a unique token for each write attempt so we can detect
+     * whether our mutation "won" the race when the state is re-read.
+     */
+    _nextWriteToken() {
+      this.writeCounter += 1;
+      return `${this.instanceToken}-${this.writeCounter}-${Date.now()}`;
+    }
+    
+    /**
+     * Normalize, sort, and deduplicate a list of tab IDs.
+     */
+    _normalizeTabs(tabs) {
+      const numericTabs = [];
+      for (let value of Array.isArray(tabs) ? tabs : []) {
+        const parsed = Number(value);
+        if (Number.isFinite(parsed) && parsed >= 0) {
+          numericTabs.push(Math.floor(parsed));
+        }
+      }
+      numericTabs.sort((a, b) => a - b);
+      const deduped = [];
+      for (let id of numericTabs) {
+        if (deduped.length === 0 || deduped[deduped.length - 1] !== id) {
+          deduped.push(id);
+        }
+      }
+      return deduped;
+    }
+    
+    _tabsChanged(prev, next) {
+      if (prev.length !== next.length) {
+        return true;
+      }
+      for (let i = 0; i < prev.length; i++) {
+        if (prev[i] !== next[i]) {
+          return true;
+        }
+      }
+      return false;
+    }
+    
+    /**
+     * Read the current tab state object from storage.
+     * Supports legacy array format for backward compatibility.
+     */
+    _readTabState() {
+      const raw = this.storage.getItem('tabs');
+      let writer = null;
+      let tabsPayload = [];
+      
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            tabsPayload = parsed;
+          } else if (parsed && Array.isArray(parsed.tabs)) {
+            tabsPayload = parsed.tabs;
+            writer = parsed.writer || null;
+          }
+        } catch (e) {
+          if (this.config.debug) {
+            console.warn('TabManager: failed to parse tab state payload, resetting.', e);
+          }
+          this.storage.removeItem('tabs');
+        }
+      }
+      
+      const normalized = this._normalizeTabs(tabsPayload);
+      if (normalized.length !== tabsPayload.length) {
+        // Rewrite state immediately to remove duplicates/invalid entries.
+        this.storage.setItem('tabs', JSON.stringify({ writer, tabs: normalized }));
+        if (this.config.debug && tabsPayload.length > normalized.length) {
+          console.log(`Removed ${tabsPayload.length - normalized.length} invalid/duplicate tab ID(s)`);
+        }
+      }
+      
+      return { writer, tabs: normalized };
+    }
+    
+    /**
+     * Write the provided tabs list to storage alongside the writer token.
+     */
+    _writeTabState(tabs, writerToken) {
+      const normalized = this._normalizeTabs(tabs);
+      this.storage.setItem('tabs', JSON.stringify({
+        writer: writerToken || null,
+        tabs: normalized
+      }));
+      return normalized;
+    }
+    
+    /**
+     * Helper method to read and deduplicate the tabs array
+     * This ensures we always work with a unique set of tab IDs
+     */
+    _readAndDeduplicateTabs() {
+      return this._readTabState().tabs;
+    }
+    
+    /**
+     * Helper method to clean up stale tabs and return deduplicated active tabs
+     */
+    _cleanupStaleTabs() {
+      let existingTabs = this._readAndDeduplicateTabs();
+      
+      const timeNow = Date.now();
+      const timeout = this.config.tabs.timeout * 1000; // Convert to milliseconds
+      
+      // Clean up stale tabs
+      const activeTabs = [];
+      for (let existingTabID of existingTabs) {
+        const ts = this.storage.getItem("tabpoll_" + existingTabID);
+        if (ts) {
+          const lastUpdateTime = new Date(1 * ts);
+          if ((lastUpdateTime == "Invalid Date") || ((timeNow - lastUpdateTime) > timeout)) {
+            // Tab is stale, remove it
+            this.storage.removeItem("tabpoll_" + existingTabID);
+          } else {
+            // Tab is still active
+            activeTabs.push(existingTabID);
+          }
+        } else {
+          // No poll timestamp, remove it
+          this.storage.removeItem("tabpoll_" + existingTabID);
+        }
+      }
+      
+      // Update storage with only active tabs (already deduplicated)
+      if (this._tabsChanged(existingTabs, activeTabs)) {
+        this._writeTabState(activeTabs, this._nextWriteToken());
+      }
+      return activeTabs;
     }
     
     initialize() {
@@ -8101,28 +9291,8 @@ var RTChat = (function (exports) {
         return;
       }
       
-      // Find the id of all the tabs open
-      let existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
-      
-      const timeNow = Date.now();
-      const timeout = this.config.tabs.timeout * 1000; // Convert to milliseconds
-      
-      // Clean up stale tabs
-      for (let existingTabID of existingTabs) {
-        const ts = this.storage.getItem("tabpoll_" + existingTabID);
-        if (ts) {
-          const lastUpdateTime = new Date(1 * ts);
-          if ((lastUpdateTime == "Invalid Date") || ((timeNow - lastUpdateTime) > timeout)) {
-            this.storage.removeItem("tabpoll_" + existingTabID);
-            existingTabs = existingTabs.filter(v => v !== existingTabID);
-            this.storage.setItem('tabs', JSON.stringify(existingTabs));
-          }
-        } else {
-          this.storage.removeItem("tabpoll_" + existingTabID);
-          existingTabs = existingTabs.filter(v => v !== existingTabID);
-          this.storage.setItem('tabs', JSON.stringify(existingTabs));
-        }
-      }
+      // Clean up stale tabs and get deduplicated active tabs
+      this._cleanupStaleTabs();
       
       // Retry loop to handle race conditions when multiple tabs initialize simultaneously
       const maxRetries = 10;
@@ -8130,8 +9300,8 @@ var RTChat = (function (exports) {
       let nextTabID = null;
       
       while (retryCount < maxRetries && nextTabID === null) {
-        // Re-read tabs list to get the most current state
-        existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+        // Re-read and deduplicate tabs list to get the most current state
+        let existingTabs = this._readAndDeduplicateTabs();
         
         // Find the next available tab ID
         // First, try to find a gap (reuse IDs from closed tabs)
@@ -8148,26 +9318,24 @@ var RTChat = (function (exports) {
           }
         }
         
-        // Verify the candidate ID is not already taken (re-read to check for race condition)
-        const currentTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
+        // Re-read and deduplicate again to check for race condition
+        let currentTabs = this._readAndDeduplicateTabs();
+        
+        // Check if candidate ID is already taken
         if (!currentTabs.includes(candidateID)) {
-          // ID is available, claim it
-          currentTabs.push(candidateID);
-          this.storage.setItem('tabs', JSON.stringify(currentTabs));
+          // ID is available, claim it atomically using writer tokens
+          const updatedTabs = [...currentTabs, candidateID];
+          const writeToken = this._nextWriteToken();
+          this._writeTabState(updatedTabs, writeToken);
           
-          // Verify we successfully claimed it (check for race condition where another tab also added it)
-          const verifyTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
-          const count = verifyTabs.filter(id => id === candidateID).length;
-          if (count === 1) {
-            // Successfully claimed unique ID
+          // Verify we successfully claimed it uniquely by ensuring our write "won"
+          const verifyState = this._readTabState();
+          if (verifyState.writer === writeToken && verifyState.tabs.includes(candidateID)) {
             nextTabID = candidateID;
           } else {
-            // Another tab also claimed this ID, remove our claim and retry
-            const cleanedTabs = verifyTabs.filter(id => id !== candidateID);
-            this.storage.setItem('tabs', JSON.stringify(cleanedTabs));
             retryCount++;
             if (this.config.debug && retryCount < maxRetries) {
-              console.log(`Tab ID conflict detected after claim, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
+              console.log(`Tab ID conflict detected after claim verification, retrying... (attempt ${retryCount + 1}/${maxRetries})`);
             }
           }
         } else {
@@ -8186,9 +9354,11 @@ var RTChat = (function (exports) {
       this.tabID = nextTabID;
       
       // Start polling to keep tab alive
-      this.storage.setItem("tabpoll_" + this.tabID, Date.now().toString());
+      const pollKey = "tabpoll_" + this.tabID;
+      this.storage.setItem(pollKey, Date.now().toString());
       this.interval = setInterval(() => {
-        this.storage.setItem("tabpoll_" + this.tabID, Date.now().toString());
+        this._ensureTabStillRegistered();
+        this.storage.setItem(pollKey, Date.now().toString());
       }, this.config.tabs.pollInterval);
       
       if (this.config.debug) {
@@ -8207,10 +9377,45 @@ var RTChat = (function (exports) {
       }
       
       if (this.tabID !== null) {
-        let existingTabs = JSON.parse(this.storage.getItem('tabs') || '[]');
-        existingTabs = existingTabs.filter(v => v !== this.tabID);
-        this.storage.setItem('tabs', JSON.stringify(existingTabs));
+        // Read and deduplicate tabs before removing this tab's ID
+        let existingTabs = this._readAndDeduplicateTabs();
+        // Remove all instances of this tab ID (should only be one, but be safe)
+        const filteredTabs = existingTabs.filter(v => v !== this.tabID);
+        if (this._tabsChanged(existingTabs, filteredTabs)) {
+          this._writeTabState(filteredTabs, this._nextWriteToken());
+        }
         this.storage.removeItem("tabpoll_" + this.tabID);
+      }
+    }
+    
+    _ensureTabStillRegistered() {
+      if (this.tabID === null || this.reinitializing) {
+        return;
+      }
+      const tabs = this._readAndDeduplicateTabs();
+      if (!tabs.includes(this.tabID)) {
+        if (this.config.debug) {
+          console.warn(`Lost ownership of tab ID ${this.tabID}, attempting recovery`);
+        }
+        this._recoverFromLostRegistration();
+      }
+    }
+    
+    _recoverFromLostRegistration() {
+      if (this.reinitializing) {
+        return;
+      }
+      this.reinitializing = true;
+      const previousTabID = this.tabID;
+      try {
+        this.cleanup();
+        this.tabID = null;
+        this.initialize();
+        if (this.config.debug) {
+          console.log(`Recovered tab ID. Old ID: ${previousTabID}, New ID: ${this.tabID}`);
+        }
+      } finally {
+        this.reinitializing = false;
       }
     }
   }
@@ -8434,7 +9639,24 @@ var RTChat = (function (exports) {
    */
 
 
-
+  // DEBUG: Intercept ALL getUserMedia calls to track stream creation
+  if (typeof navigator !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+    const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+    navigator.mediaDevices.getUserMedia = function(constraints) {
+      console.log("🎥🎤 getUserMedia CALLED with constraints:", constraints);
+      console.trace("getUserMedia call stack");
+      return originalGetUserMedia(constraints).then(stream => {
+        console.log("🎥🎤 getUserMedia RETURNED stream with tracks:", stream.getTracks().map(t => `${t.kind}:${t.id}`).join(', '));
+        // Add tracking when tracks end
+        stream.getTracks().forEach(track => {
+          track.addEventListener('ended', () => {
+            console.log("🛑 Track ENDED:", track.kind, track.id);
+          });
+        });
+        return stream;
+      });
+    };
+  }
 
   //______________________________________________________________________________________________________________________
 
@@ -8528,6 +9750,15 @@ var RTChat = (function (exports) {
       this.rtcConnections = {};
       this.knownUsers = {};
       this.pendingIceCandidates = {};
+      this.maxConnectRetries = configObj.webrtc?.maxConnectRetries || 3;
+      this.connectRetryDelay = configObj.webrtc?.connectRetryDelay || 4000;
+      this.waitForAnswerTimeout = configObj.webrtc?.waitForAnswerTimeout || 12000;
+      this.connectingUsers = new Set();
+      this.attemptedPeers = new Set();
+      this.waitingForPeerInitiation = new Map(); // Track peers we're waiting to initiate (peerName -> timeoutId)
+      this.sharedLocalStream = null; // Shared media stream for all connections (one-to-many)
+      this.maxConnectRetries = configObj.webrtc?.maxConnectRetries || 3;
+      this.connectRetryDelay = configObj.webrtc?.connectRetryDelay || 4000;
 
 
       this.mqttHistory = [];
@@ -8583,13 +9814,18 @@ var RTChat = (function (exports) {
       }
     }
     _onMQTTConnect(){
+      console.log(`MQTT transport connected, subscribing to ${this.topic} as ${this.name}`);
       this.client.subscribe(this.topic, ((err)=>{
       if (!err) {
           console.log("subscribed to ", this.topic);
           // Send initial connect message immediately after subscription is confirmed
           // This ensures we announce our presence as soon as we're ready to receive messages
-          this.postPubliclyToMQTTServer("connect", this.userInfo);
-          this.onConnectedToMQTT();
+          console.log(`MQTT subscribed to ${this.topic}, listening for presence as ${this.name}`);
+          setTimeout(() => {
+            console.log(`MQTT connect: announcing presence as ${this.name} in ${this.topic}`);
+            this.postPubliclyToMQTTServer("connect", this.userInfo);
+            this.onConnectedToMQTT();
+          }, 500);
           
           // Also set up periodic announcements to catch any missed connections
           // This handles race conditions when two users connect simultaneously
@@ -8694,6 +9930,10 @@ var RTChat = (function (exports) {
         clearInterval(this.announceInterval);
         this.announceInterval = null;
       }
+      if (this.connectionMaintenanceInterval) {
+        clearInterval(this.connectionMaintenanceInterval);
+        this.connectionMaintenanceInterval = null;
+      }
       
       // Cleanup MQTT client
       if (this.client) {
@@ -8747,6 +9987,7 @@ var RTChat = (function (exports) {
       connect: payload => {//connection
           // Log removed to reduce console noise
           
+          console.log(`MQTT connect message received from ${payload.sender}, initiating WebRTC signaling flow`);
           // Check if we're already connected and the connection is healthy
           const existingConnection = this.rtcConnections[payload.sender];
           if (existingConnection) {
@@ -8761,16 +10002,17 @@ var RTChat = (function (exports) {
                   return;
               }
               
+              const weShouldInitiate = this._shouldInitiateConnection(payload.sender);
               // Connection exists but is broken, disconnect it
-              if (connectionState === "failed" || connectionState === "closed" ||
-                  iceConnectionState === "failed" || iceConnectionState === "closed") {
+              if (weShouldInitiate && (connectionState === "failed" || connectionState === "closed" ||
+                  iceConnectionState === "failed" || iceConnectionState === "closed")) {
                   console.warn("Connection to " + payload.sender + " is broken, disconnecting");
                   this.disconnectFromUser(payload.sender);
               } else if (connectionState === "new") {
                   // Connection is in "new" state - check if it's been stuck for too long
                   // If it's been more than 10 seconds, allow a retry
                   const connectionAge = Date.now() - (existingConnection.createdAt || 0);
-                  if (connectionAge > 10000) {
+                  if (weShouldInitiate && connectionAge > 10000) {
                       console.warn("Connection to " + payload.sender + " stuck in 'new' state for " + connectionAge + "ms, allowing retry");
                       this.disconnectFromUser(payload.sender);
                       // Fall through to create new connection
@@ -8786,7 +10028,7 @@ var RTChat = (function (exports) {
               } else {
                   // Other states (checking, etc.), allow retry if stuck
                   const connectionAge = Date.now() - (existingConnection.createdAt || 0);
-                  if (connectionAge > 15000) {
+                  if (weShouldInitiate && connectionAge > 15000) {
                       console.warn("Connection to " + payload.sender + " stuck in '" + connectionState + "' state for " + connectionAge + "ms, allowing retry");
                       this.disconnectFromUser(payload.sender);
                       // Fall through to create new connection
@@ -8799,10 +10041,54 @@ var RTChat = (function (exports) {
           }
           
           this.knownUsers[payload.sender] = payload.data;
-          this.shouldConnectToUser(payload.sender, payload.data).then(r => {
-              if (r){
-                  this.connectToUser(payload.sender);
+          this.shouldConnectToUser(payload.sender, payload.data).then(shouldConnect => {
+              if (!shouldConnect){
+                  return;
               }
+              if (!this._shouldInitiateConnection(payload.sender)) {
+                  console.log("connect: Waiting for peer " + payload.sender + " to initiate connection");
+                  
+                  // Set up a fallback timeout: if peer doesn't initiate within waitForAnswerTimeout,
+                  // we'll initiate anyway to prevent hanging
+                  if (!this.waitingForPeerInitiation.has(payload.sender) && 
+                      !this.connectionToUser(payload.sender) && 
+                      !this.attemptedPeers.has(payload.sender)) {
+                      
+                      const fallbackTimeout = setTimeout(() => {
+                          console.warn("connect: Peer " + payload.sender + " did not initiate connection within timeout. Initiating fallback connection.");
+                          this.waitingForPeerInitiation.delete(payload.sender);
+                          
+                          // Double-check we're still not connected before initiating
+                          if (!this.connectionToUser(payload.sender) && !this.attemptedPeers.has(payload.sender)) {
+                              this.attemptedPeers.add(payload.sender);
+                              setTimeout(() => this.attemptedPeers.delete(payload.sender), this.waitForAnswerTimeout);
+                              this.connectToUser(payload.sender);
+                          }
+                      }, this.waitForAnswerTimeout);
+                      
+                      this.waitingForPeerInitiation.set(payload.sender, fallbackTimeout);
+                  }
+                  return;
+              }
+              
+              // We should initiate - clear any waiting timeout
+              const waitingTimeout = this.waitingForPeerInitiation.get(payload.sender);
+              if (waitingTimeout) {
+                  clearTimeout(waitingTimeout);
+                  this.waitingForPeerInitiation.delete(payload.sender);
+              }
+              
+              if (this.connectionToUser(payload.sender)) {
+                  console.log("connect: Already connected or connecting to " + payload.sender);
+                  return;
+              }
+              if (this.attemptedPeers.has(payload.sender)) {
+                  console.log("connect: Already attempted connection to " + payload.sender);
+                  return;
+              }
+              this.attemptedPeers.add(payload.sender);
+              setTimeout(() => this.attemptedPeers.delete(payload.sender), this.waitForAnswerTimeout);
+              this.connectToUser(payload.sender);
           });
       },
       nameChange: payload => {//name
@@ -8815,7 +10101,16 @@ var RTChat = (function (exports) {
       RTCOffer: payload => {//rtc offer
           this.shouldConnectToUser(payload.sender, payload.data.userInfo).then(r => {
               if (r){
-                  if (payload.data.offer.target != this.name){return}                if (this.rtcConnections[payload.sender]){
+                  if (payload.data.offer.target != this.name){return}                
+                  // Clear waiting timeout since peer is initiating connection
+                  const waitingTimeout = this.waitingForPeerInitiation.get(payload.sender);
+                  if (waitingTimeout) {
+                      clearTimeout(waitingTimeout);
+                      this.waitingForPeerInitiation.delete(payload.sender);
+                      console.log("RTCOffer: Cleared waiting timeout for " + payload.sender);
+                  }
+                  
+                  if (this.rtcConnections[payload.sender]){
                       console.warn("Already have a connection to " + payload.sender + ". Closing and reopening.");
                       this.rtcConnections[payload.sender].close();
                   }
@@ -8865,42 +10160,112 @@ var RTChat = (function (exports) {
       let callStartPromise;
       if (callInfo instanceof MediaStream){
           let localStream = callInfo;
+          // Store as shared stream if we don't have one
+          if (!this.sharedLocalStream) {
+            console.log("MQTTRTCClient.callUser: Storing provided stream as sharedLocalStream");
+            this.sharedLocalStream = localStream;
+          }
+          console.log("MQTTRTCClient.callUser: Using provided MediaStream");
           // startCall returns a promise that resolves to {localStream, remoteStream}
           callStartPromise = this.rtcConnections[user].startCall(localStream);
       }else {
           callInfo = callInfo || {video: true, audio: true};
-          callStartPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
-              // startCall returns a promise that resolves to {localStream, remoteStream}
-              return this.rtcConnections[user].startCall(localStream);
-          });
+          
+          // CRITICAL: If a stream is being created (pending promise exists), wait for it
+          if (this.sharedLocalStreamPromise) {
+            console.log("MQTTRTCClient.callUser: ⏳ Waiting for pending shared stream creation");
+            callStartPromise = this.sharedLocalStreamPromise.then(sharedStream => {
+              console.log("MQTTRTCClient.callUser: ♻️ Using stream from pending promise (tracks:", sharedStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+              return this.rtcConnections[user].startCall(sharedStream);
+            });
+          }
+          // Reuse shared stream if it exists and matches callInfo
+          else if (this.sharedLocalStream) {
+            const hasVideo = this.sharedLocalStream.getVideoTracks().length > 0;
+            const hasAudio = this.sharedLocalStream.getAudioTracks().length > 0;
+            const matches = (callInfo.video === hasVideo || !callInfo.video) && 
+                           (callInfo.audio === hasAudio || !callInfo.audio);
+            if (matches) {
+              console.log("MQTTRTCClient.callUser: ♻️ Reusing shared local stream (tracks:", this.sharedLocalStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+              callStartPromise = this.rtcConnections[user].startCall(this.sharedLocalStream);
+            } else {
+              console.log("MQTTRTCClient.callUser: ⚠️ Shared stream doesn't match callInfo, creating new stream");
+              this.sharedLocalStreamPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
+                console.log("MQTTRTCClient.callUser: 🆕 Created new stream (tracks:", localStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+                this.sharedLocalStream = localStream;
+                this.sharedLocalStreamPromise = null; // Clear promise after resolution
+                return localStream;
+              });
+              callStartPromise = this.sharedLocalStreamPromise.then(stream => {
+                return this.rtcConnections[user].startCall(stream);
+              });
+            }
+          } else {
+            console.log("MQTTRTCClient.callUser: 🆕 Creating first shared local stream");
+            // Create promise and store it IMMEDIATELY to prevent race condition
+            this.sharedLocalStreamPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
+              console.log("MQTTRTCClient.callUser: 🆕 Created first stream (tracks:", localStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+              this.sharedLocalStream = localStream;
+              this.sharedLocalStreamPromise = null; // Clear promise after resolution
+              return localStream;
+            });
+            callStartPromise = this.sharedLocalStreamPromise.then(stream => {
+              return this.rtcConnections[user].startCall(stream);
+            });
+          }
       }
       let callEndPromise = this.rtcConnections[user].callEndPromise.promise;
       return {start: callStartPromise, end: callEndPromise};
     }
     endCallWithUser(user){
-      console.log("Ending call with " + user);
+      console.log("MQTTRTCClient.endCallWithUser: Ending call with " + user);
+      console.log("MQTTRTCClient.endCallWithUser: Available connections:", Object.keys(this.rtcConnections));
       if (this.rtcConnections[user]){
           try {
+              console.log("MQTTRTCClient.endCallWithUser: Calling endCall on RTCConnection for " + user);
               this.rtcConnections[user].endCall();
-              console.log("Sent endcall message to " + user + " via RTC data channel");
+              console.log("MQTTRTCClient.endCallWithUser: Sent endcall message to " + user + " via RTC data channel");
           } catch (err) {
-              console.warn("Failed to send endcall via RTC channel, trying MQTT fallback:", err);
+              console.warn("MQTTRTCClient.endCallWithUser: Failed to send endcall via RTC channel, trying MQTT fallback:", err);
               // Fallback: send via MQTT if RTC channel fails
               try {
                   this.sendOverRTC("endcall", null, user);
-                  console.log("Sent endcall message to " + user + " via MQTT fallback");
+                  console.log("MQTTRTCClient.endCallWithUser: Sent endcall message to " + user + " via MQTT fallback");
               } catch (mqttErr) {
-                  console.error("Failed to send endcall message to " + user + " via both RTC and MQTT:", mqttErr);
+                  console.error("MQTTRTCClient.endCallWithUser: Failed to send endcall message to " + user + " via both RTC and MQTT:", mqttErr);
               }
           }
       } else {
-          console.warn("No RTC connection found for " + user + ", cannot send endcall message");
+          console.warn("MQTTRTCClient.endCallWithUser: No RTC connection found for " + user + ", cannot send endcall message");
       }
     }
     callFromUser(user, callInfo, initiatedCall, promises){
       callInfo = callInfo || {video: true, audio: true};
       if (initiatedCall){
-          return navigator.mediaDevices.getUserMedia(callInfo)
+          // CRITICAL: If a stream is being created (pending promise exists), wait for it
+          if (this.sharedLocalStreamPromise) {
+            console.log("MQTTRTCClient.callFromUser: ⏳ Waiting for pending shared stream creation");
+            return this.sharedLocalStreamPromise;
+          }
+          // Reuse shared stream if it exists
+          if (this.sharedLocalStream) {
+            const hasVideo = this.sharedLocalStream.getVideoTracks().length > 0;
+            const hasAudio = this.sharedLocalStream.getAudioTracks().length > 0;
+            const matches = (callInfo.video === hasVideo || !callInfo.video) && 
+                           (callInfo.audio === hasAudio || !callInfo.audio);
+            if (matches) {
+              console.log("MQTTRTCClient.callFromUser: ♻️ Reusing shared local stream (tracks:", this.sharedLocalStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+              return Promise.resolve(this.sharedLocalStream);
+            }
+          }
+          console.log("MQTTRTCClient.callFromUser: 🆕 Creating new shared local stream");
+          this.sharedLocalStreamPromise = navigator.mediaDevices.getUserMedia(callInfo).then(stream => {
+            console.log("MQTTRTCClient.callFromUser: 🆕 Created stream (tracks:", stream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+            this.sharedLocalStream = stream;
+            this.sharedLocalStreamPromise = null; // Clear promise after resolution
+            return stream;
+          });
+          return this.sharedLocalStreamPromise;
       }else {
           return this.acceptCallFromUser(user, callInfo, promises).then(r=> {
               if (r === false || r === null || r === undefined){
@@ -8911,7 +10276,30 @@ var RTChat = (function (exports) {
               const mediaCallInfo = (typeof r === 'object' && r !== null && (r.video !== undefined || r.audio !== undefined)) 
                   ? r 
                   : callInfo;
-              return navigator.mediaDevices.getUserMedia(mediaCallInfo)
+              // CRITICAL: If a stream is being created (pending promise exists), wait for it
+              if (this.sharedLocalStreamPromise) {
+                console.log("MQTTRTCClient.callFromUser: ⏳ Waiting for pending shared stream creation (incoming)");
+                return this.sharedLocalStreamPromise;
+              }
+              // Reuse shared stream if it exists
+              if (this.sharedLocalStream) {
+                const hasVideo = this.sharedLocalStream.getVideoTracks().length > 0;
+                const hasAudio = this.sharedLocalStream.getAudioTracks().length > 0;
+                const matches = (mediaCallInfo.video === hasVideo || !mediaCallInfo.video) && 
+                               (mediaCallInfo.audio === hasAudio || !mediaCallInfo.audio);
+                if (matches) {
+                  console.log("MQTTRTCClient.callFromUser: ♻️ Reusing shared local stream (incoming) (tracks:", this.sharedLocalStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+                  return Promise.resolve(this.sharedLocalStream);
+                }
+              }
+              console.log("MQTTRTCClient.callFromUser: 🆕 Creating new shared local stream (incoming)");
+              this.sharedLocalStreamPromise = navigator.mediaDevices.getUserMedia(mediaCallInfo).then(stream => {
+                console.log("MQTTRTCClient.callFromUser: 🆕 Created stream (incoming) (tracks:", stream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+                this.sharedLocalStream = stream;
+                this.sharedLocalStreamPromise = null; // Clear promise after resolution
+                return stream;
+              });
+              return this.sharedLocalStreamPromise;
           })
       }
     }
@@ -8925,18 +10313,34 @@ var RTChat = (function (exports) {
        return Promise.resolve(true);
     }
     connectToUser(user){
-      if (this.rtcConnections[user]){
-          console.warn("Already connected to " + user);
-          try{
-              this.disconnectFromUser(user);
-          }catch{}
-          delete this.rtcConnections[user];
+      if (!user || user === this.name){
+          return null;
       }
-      if (!this.connectionToUser(user)){
-          this.rtcConnections[user] = new RTCConnection(this, user);
-          this.rtcConnections[user].sendOffer();
+      const establishedConnection = this.connectionToUser(user);
+      if (establishedConnection){
+          console.log("connectToUser: Already connected or connecting to " + user);
+          return establishedConnection;
+      }
+      if (this.rtcConnections[user]){
+          console.log("connectToUser: Connection to " + user + " is still negotiating");
           return this.rtcConnections[user];
       }
+      console.log(`connectToUser: Starting WebRTC offer to ${user}`);
+      const rtcConnection = new RTCConnection(this, user);
+      this.rtcConnections[user] = rtcConnection;
+      rtcConnection.sendOffer();
+      return rtcConnection;
+    }
+    _shouldInitiateConnection(peerName){
+      if (!peerName){
+          return false;
+      }
+      // Deterministic tie-breaker: lexicographically smaller name initiates
+      // If names are identical (shouldn't happen), fall back to comparing lengths
+      if (this.name === peerName){
+          return this.name.length <= peerName.length;
+      }
+      return this.name.localeCompare(peerName) < 0;
     }
     connectionToUser(user){
       let existingConnection = this.rtcConnections[user];
@@ -8976,6 +10380,15 @@ var RTChat = (function (exports) {
       }else {
           console.warn("No connection to close to " + user);
       }
+      this.connectingUsers.delete(user);
+      this.attemptedPeers.delete(user);
+      
+      // Clear any waiting timeout for this user
+      const waitingTimeout = this.waitingForPeerInitiation.get(user);
+      if (waitingTimeout) {
+          clearTimeout(waitingTimeout);
+          this.waitingForPeerInitiation.delete(user);
+      }
     }
     onConnectedToUser(user){
       console.log("Connected to user ", user);
@@ -8996,6 +10409,8 @@ var RTChat = (function (exports) {
     onDisconnectedFromUser(user){
       console.log("Disconnected from user ", user);
       this.emit('disconnectedfrompeer', user);
+      this.connectingUsers.delete(user);
+      this.attemptedPeers.delete(user);
     }
 
     changeName(newName){
@@ -9097,6 +10512,7 @@ var RTChat = (function (exports) {
           this.mqttClient = mqttClient;
           this.dataChannels = {};
           this.createdAt = Date.now(); // Track when connection was created
+          this.pendingIceCandidates = []; // Store pending ICE candidates for this connection
           this.peerConnection = new RTCPeerConnection(this.rtcConfiguration);
           this.peerConnection.onicecandidate = this.onicecandidate.bind(this);
 
@@ -9125,6 +10541,7 @@ var RTChat = (function (exports) {
           }).bind(this);
 
           this.pendingStreamIceCandidate = null;
+          this.pendingStreamIceCandidates = []; // Array to store multiple pending ICE candidates
           this.streamConnection = null;
           this.remoteStream = null;
           this.localStream = null;
@@ -9163,6 +10580,10 @@ var RTChat = (function (exports) {
 
       startCall(stream){
           this.initiatedCall = true;
+          if (this.streamConnection && this.streamConnection.signalingState !== "closed"){
+              console.warn("startCall: stream connection already active or negotiating; returning existing promise");
+              return this.streamPromise.promise;
+          }
           // Detect call type from stream tracks
           const hasVideo = stream.getVideoTracks().length > 0;
           const hasAudio = stream.getAudioTracks().length > 0;
@@ -9182,8 +10603,8 @@ var RTChat = (function (exports) {
       }
       _makeStreamConnection(stream){
           if (this.streamConnection){
-              console.warn("Already have a stream connection");
-              return;
+              console.warn("Already have a stream connection, reusing existing instance");
+              return this.streamConnection;
           }
           this.localStream = stream;
           this.streamConnection = new RTCPeerConnection(this.rtcConfiguration);
@@ -9207,6 +10628,14 @@ var RTChat = (function (exports) {
           this.mqttClient.oncallconnected(this.target, d);
       }
       sendOffer(){
+          if (!this.peerConnection){
+              console.error("sendOffer called but peerConnection missing");
+              return;
+          }
+          if (this.peerConnection.signalingState !== "stable"){
+              console.warn(`sendOffer: signaling state is ${this.peerConnection.signalingState}, waiting for stable state before creating offer`);
+              return;
+          }
           this.setupDataChannels();
           this.peerConnection.createOffer()
             .then(offer => this.peerConnection.setLocalDescription(offer))
@@ -9239,7 +10668,23 @@ var RTChat = (function (exports) {
               }
               return;
           }
-          this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
+          this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer))
+              .then(() => {
+                  // Apply all pending ICE candidates now that remote description is set
+                  if (this.pendingIceCandidates && this.pendingIceCandidates.length > 0) {
+                      console.log(`Applying ${this.pendingIceCandidates.length} pending ICE candidates for ${this.target}`);
+                      this.pendingIceCandidates.forEach(candidate => {
+                          this.peerConnection.addIceCandidate(new RTCIceCandidate(candidate))
+                              .catch(err => {
+                                  console.warn('Error adding pending ICE candidate:', err);
+                              });
+                      });
+                      this.pendingIceCandidates = [];
+                  }
+              })
+              .catch(err => {
+                  console.error('Error setting remote description:', err);
+              });
           // Wait for all data channels to be ready before notifying connection
           this.loadPromise.then((() => {
               this.send("connectedViaRTC", null);
@@ -9326,10 +10771,12 @@ var RTChat = (function (exports) {
                           // Send answer via MQTT
                           console.log("Sending stream answer", this.streamConnection.localDescription);
                           this.send("streamanswer", JSON.stringify({"answer": this.streamConnection.localDescription}));
-                          if (this.pendingStreamIceCandidate){
-                              console.log("Found pending stream ice candidate");
-                              this.streamConnection.addIceCandidate(new RTCIceCandidate(this.pendingStreamIceCandidate));
-                              this.pendingStreamIceCandidate = null;
+                          
+                          // Apply pending ICE candidates after setting local description
+                          // Note: We still need remote description to be set, so these will be applied
+                          // when the remote description is set in the streamanswer handler
+                          if (this.pendingStreamIceCandidate || (this.pendingStreamIceCandidates && this.pendingStreamIceCandidates.length > 0)) {
+                              console.log("Found pending stream ice candidates, will apply when remote description is set");
                           }
                       })
                       .catch(err => {
@@ -9340,14 +10787,73 @@ var RTChat = (function (exports) {
           }else if (channel === "streamanswer"){
               console.log("received stream answer", event.data);
               let {answer} = JSON.parse(event.data);
-              this.streamConnection.setRemoteDescription(new RTCSessionDescription(answer));
+              this.streamConnection.setRemoteDescription(new RTCSessionDescription(answer))
+                  .then(() => {
+                      // Apply all pending ICE candidates now that remote description is set
+                      if (this.pendingStreamIceCandidates && this.pendingStreamIceCandidates.length > 0) {
+                          console.log(`Applying ${this.pendingStreamIceCandidates.length} pending ICE candidates`);
+                          this.pendingStreamIceCandidates.forEach(candidate => {
+                              try {
+                                  this.streamConnection.addIceCandidate(new RTCIceCandidate(candidate))
+                                      .catch(err => {
+                                          console.warn('Error adding pending ICE candidate:', err);
+                                      });
+                              } catch (err) {
+                                  console.warn('Error creating ICE candidate:', err);
+                              }
+                          });
+                          this.pendingStreamIceCandidates = [];
+                      }
+                      // Also handle single pending candidate for backward compatibility
+                      if (this.pendingStreamIceCandidate) {
+                          try {
+                              this.streamConnection.addIceCandidate(new RTCIceCandidate(this.pendingStreamIceCandidate))
+                                  .catch(err => {
+                                      console.warn('Error adding pending ICE candidate:', err);
+                                  });
+                              this.pendingStreamIceCandidate = null;
+                          } catch (err) {
+                              console.warn('Error creating ICE candidate:', err);
+                          }
+                      }
+                  })
+                  .catch(err => {
+                      console.error('Error setting remote description:', err);
+                  });
           }else if (channel === "streamice"){
               console.log("received stream ice", event.data);
               if (event.data){
+                  const candidateData = JSON.parse(event.data);
                   if (this.streamConnection){
-                      this.streamConnection.addIceCandidate(new RTCIceCandidate(JSON.parse(event.data)));
+                      // Check if remote description is set before adding ICE candidate
+                      if (this.streamConnection.remoteDescription) {
+                          // Remote description is set, safe to add ICE candidate
+                          this.streamConnection.addIceCandidate(new RTCIceCandidate(candidateData))
+                              .catch(err => {
+                                  // If it fails, store it as pending (might be a duplicate or invalid)
+                                  console.warn('Error adding ICE candidate, storing as pending:', err);
+                                  if (!this.pendingStreamIceCandidates) {
+                                      this.pendingStreamIceCandidates = [];
+                                  }
+                                  this.pendingStreamIceCandidates.push(candidateData);
+                              });
+                      } else {
+                          // Remote description not set yet, store as pending
+                          console.log('Remote description not set yet, storing ICE candidate as pending');
+                          if (!this.pendingStreamIceCandidates) {
+                              this.pendingStreamIceCandidates = [];
+                          }
+                          this.pendingStreamIceCandidates.push(candidateData);
+                          // Also set single pending for backward compatibility
+                          this.pendingStreamIceCandidate = candidateData;
+                      }
                   }else {
-                      this.pendingStreamIceCandidate = JSON.parse(event.data);
+                      // Stream connection doesn't exist yet, store as pending
+                      this.pendingStreamIceCandidate = candidateData;
+                      if (!this.pendingStreamIceCandidates) {
+                          this.pendingStreamIceCandidates = [];
+                      }
+                      this.pendingStreamIceCandidates.push(candidateData);
                   }
               }
           }else if (channel === "endcall"){
@@ -9381,22 +10887,71 @@ var RTChat = (function (exports) {
       }
       _closeCall(){
           console.log("RTCConnection._closeCall: Closing call with " + this.target);
+          
+          // Mark this connection as closed FIRST (before checking others)
+          const wasStreamConnectionActive = !!this.streamConnection;
+          
           if (this.streamConnection){
               this.streamConnection.close();
-              if (this.localStream){
-                  this.localStream.getTracks().forEach(track => track.stop());
-              }
+              this.streamConnection = null;
+              
+              // Always stop remote stream tracks (they're specific to this connection)
               if (this.remoteStream){
-                  this.remoteStream.getTracks().forEach(track => track.stop());
+                  const remoteTracks = this.remoteStream.getTracks();
+                  console.log(`RTCConnection._closeCall: Stopping ${remoteTracks.length} remote track(s) for ${this.target}`);
+                  remoteTracks.forEach(track => track.stop());
               }
               this.remoteStream = null;
-              this.localStream = null;
+              this.localStream = null; // Clear reference from THIS connection
+          } else {
+              console.log(`RTCConnection._closeCall: No streamConnection for ${this.target}`);
           }
+          
+          // Only check for other connections if THIS connection actually had a stream
+          if (wasStreamConnectionActive) {
+              // Count OTHER connections that still have active streamConnections
+              let otherActiveConnections = 0;
+              const allConnections = [];
+              if (this.mqttClient && this.mqttClient.rtcConnections) {
+                  for (const [user, conn] of Object.entries(this.mqttClient.rtcConnections)) {
+                      const hasStreamConn = !!(conn && conn.streamConnection);
+                      allConnections.push(`${user}:${hasStreamConn ? 'active' : 'inactive'}`);
+                      if (user !== this.target && conn && conn.streamConnection) {
+                          otherActiveConnections++;
+                          console.log(`RTCConnection._closeCall: Found other active connection: ${user}`);
+                      }
+                  }
+              }
+              
+              console.log(`RTCConnection._closeCall: All connections: [${allConnections.join(', ')}]`);
+              console.log(`RTCConnection._closeCall: ${otherActiveConnections} other active connections remain (excluding ${this.target})`);
+              
+              // Only stop shared stream tracks if NO other connections exist
+              if (otherActiveConnections === 0) {
+                  if (this.mqttClient && this.mqttClient.sharedLocalStream) {
+                      console.log(`RTCConnection._closeCall: ✅ Last connection closed, stopping shared stream tracks`);
+                      const tracks = this.mqttClient.sharedLocalStream.getTracks();
+                      console.log(`RTCConnection._closeCall: Shared stream has ${tracks.length} tracks`);
+                      tracks.forEach(track => {
+                          console.log(`RTCConnection._closeCall: 🛑 Stopping ${track.kind} track ${track.id} (readyState: ${track.readyState})`);
+                          track.stop();
+                          console.log(`RTCConnection._closeCall: ✅ Stopped ${track.kind} track ${track.id} (new readyState: ${track.readyState})`);
+                      });
+                      this.mqttClient.sharedLocalStream = null;
+                      this.mqttClient.sharedLocalStreamPromise = null; // Also clear the promise
+                      console.log(`RTCConnection._closeCall: ✅ Shared stream and promise cleared`);
+                  } else {
+                      console.log(`RTCConnection._closeCall: No shared stream to stop`);
+                  }
+              } else {
+                  console.log(`RTCConnection._closeCall: ⏸️  ${otherActiveConnections} other connections still active, keeping shared stream alive`);
+              }
+          }
+          
           this.callEndPromise.resolve();
           this.callEndPromise = new DeferredPromise();
           this.callRinging = false;
           this.initiatedCall = false;
-          this.streamConnection = null;
           this.pendingStreamIceCandidate = null;
           this.streamConnectionPromise = new DeferredPromise();
           this.streamPromise = new DeferredPromise();
@@ -9412,7 +10967,22 @@ var RTChat = (function (exports) {
       }
 
       onReceivedIceCandidate(data) {
-          this.peerConnection.addIceCandidate(new RTCIceCandidate(data));
+          // Check if remote description is set before adding ICE candidate
+          if (this.peerConnection.remoteDescription) {
+              this.peerConnection.addIceCandidate(new RTCIceCandidate(data))
+                  .catch(err => {
+                      // ICE candidate might be invalid or duplicate, log but don't throw
+                      console.warn('Error adding ICE candidate to peer connection:', err);
+                  });
+          } else {
+              // Remote description not set yet, store as pending
+              // The pending ICE candidate will be applied when the answer is received
+              if (!this.pendingIceCandidates) {
+                  this.pendingIceCandidates = [];
+              }
+              this.pendingIceCandidates.push(data);
+              console.log('Remote description not set, storing ICE candidate as pending');
+          }
       }
 
       onicecandidate(event){

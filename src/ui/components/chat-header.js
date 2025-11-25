@@ -126,6 +126,15 @@ class ChatHeader extends UIComponentBase {
   }
   
   _setupEventListeners() {
+    // Header click to toggle collapse/expand
+    const chatHeader = this.queryRoot('.chat-header');
+    if (chatHeader) {
+      chatHeader.addEventListener('click', (e) => {
+        // Only trigger toggle if clicking the header itself, not its interactive children
+        this.dispatchCustomEvent('togglecollapse');
+      });
+    }
+    
     // Room name editing
     if (this.roomName) {
       if (this.getConfig('allowRoomChange')) {

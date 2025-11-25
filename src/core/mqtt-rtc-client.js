@@ -66,7 +66,24 @@ import { MQTTLoader } from './mqtt-loader.js';
 import { EventEmitter } from '../utils/event-emitter.js';
 import { DeferredPromise } from '../utils/deferred-promise.js';
 
-
+// DEBUG: Intercept ALL getUserMedia calls to track stream creation
+if (typeof navigator !== 'undefined' && navigator.mediaDevices && navigator.mediaDevices.getUserMedia) {
+  const originalGetUserMedia = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
+  navigator.mediaDevices.getUserMedia = function(constraints) {
+    console.log("🎥🎤 getUserMedia CALLED with constraints:", constraints);
+    console.trace("getUserMedia call stack");
+    return originalGetUserMedia(constraints).then(stream => {
+      console.log("🎥🎤 getUserMedia RETURNED stream with tracks:", stream.getTracks().map(t => `${t.kind}:${t.id}`).join(', '));
+      // Add tracking when tracks end
+      stream.getTracks().forEach(track => {
+        track.addEventListener('ended', () => {
+          console.log("🛑 Track ENDED:", track.kind, track.id);
+        });
+      });
+      return stream;
+    });
+  };
+}
 
 //______________________________________________________________________________________________________________________
 
@@ -165,6 +182,8 @@ class BaseMQTTRTCClient extends EventEmitter {
     this.waitForAnswerTimeout = configObj.webrtc?.waitForAnswerTimeout || 12000;
     this.connectingUsers = new Set();
     this.attemptedPeers = new Set();
+    this.waitingForPeerInitiation = new Map(); // Track peers we're waiting to initiate (peerName -> timeoutId)
+    this.sharedLocalStream = null; // Shared media stream for all connections (one-to-many)
     this.maxConnectRetries = configObj.webrtc?.maxConnectRetries || 3;
     this.connectRetryDelay = configObj.webrtc?.connectRetryDelay || 4000;
 
@@ -455,8 +474,37 @@ class BaseMQTTRTCClient extends EventEmitter {
             }
             if (!this._shouldInitiateConnection(payload.sender)) {
                 console.log("connect: Waiting for peer " + payload.sender + " to initiate connection");
+                
+                // Set up a fallback timeout: if peer doesn't initiate within waitForAnswerTimeout,
+                // we'll initiate anyway to prevent hanging
+                if (!this.waitingForPeerInitiation.has(payload.sender) && 
+                    !this.connectionToUser(payload.sender) && 
+                    !this.attemptedPeers.has(payload.sender)) {
+                    
+                    const fallbackTimeout = setTimeout(() => {
+                        console.warn("connect: Peer " + payload.sender + " did not initiate connection within timeout. Initiating fallback connection.");
+                        this.waitingForPeerInitiation.delete(payload.sender);
+                        
+                        // Double-check we're still not connected before initiating
+                        if (!this.connectionToUser(payload.sender) && !this.attemptedPeers.has(payload.sender)) {
+                            this.attemptedPeers.add(payload.sender);
+                            setTimeout(() => this.attemptedPeers.delete(payload.sender), this.waitForAnswerTimeout);
+                            this.connectToUser(payload.sender);
+                        }
+                    }, this.waitForAnswerTimeout);
+                    
+                    this.waitingForPeerInitiation.set(payload.sender, fallbackTimeout);
+                }
                 return;
             }
+            
+            // We should initiate - clear any waiting timeout
+            const waitingTimeout = this.waitingForPeerInitiation.get(payload.sender);
+            if (waitingTimeout) {
+                clearTimeout(waitingTimeout);
+                this.waitingForPeerInitiation.delete(payload.sender);
+            }
+            
             if (this.connectionToUser(payload.sender)) {
                 console.log("connect: Already connected or connecting to " + payload.sender);
                 return;
@@ -481,6 +529,15 @@ class BaseMQTTRTCClient extends EventEmitter {
         this.shouldConnectToUser(payload.sender, payload.data.userInfo).then(r => {
             if (r){
                 if (payload.data.offer.target != this.name){return};
+                
+                // Clear waiting timeout since peer is initiating connection
+                const waitingTimeout = this.waitingForPeerInitiation.get(payload.sender);
+                if (waitingTimeout) {
+                    clearTimeout(waitingTimeout);
+                    this.waitingForPeerInitiation.delete(payload.sender);
+                    console.log("RTCOffer: Cleared waiting timeout for " + payload.sender);
+                }
+                
                 if (this.rtcConnections[payload.sender]){
                     console.warn("Already have a connection to " + payload.sender + ". Closing and reopening.")
                     this.rtcConnections[payload.sender].close();
@@ -532,42 +589,112 @@ class BaseMQTTRTCClient extends EventEmitter {
     let callStartPromise;
     if (callInfo instanceof MediaStream){
         let localStream = callInfo;
+        // Store as shared stream if we don't have one
+        if (!this.sharedLocalStream) {
+          console.log("MQTTRTCClient.callUser: Storing provided stream as sharedLocalStream");
+          this.sharedLocalStream = localStream;
+        }
+        console.log("MQTTRTCClient.callUser: Using provided MediaStream");
         // startCall returns a promise that resolves to {localStream, remoteStream}
         callStartPromise = this.rtcConnections[user].startCall(localStream);
     }else{
         callInfo = callInfo || {video: true, audio: true}
-        callStartPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
-            // startCall returns a promise that resolves to {localStream, remoteStream}
-            return this.rtcConnections[user].startCall(localStream);
-        });
+        
+        // CRITICAL: If a stream is being created (pending promise exists), wait for it
+        if (this.sharedLocalStreamPromise) {
+          console.log("MQTTRTCClient.callUser: ⏳ Waiting for pending shared stream creation");
+          callStartPromise = this.sharedLocalStreamPromise.then(sharedStream => {
+            console.log("MQTTRTCClient.callUser: ♻️ Using stream from pending promise (tracks:", sharedStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+            return this.rtcConnections[user].startCall(sharedStream);
+          });
+        }
+        // Reuse shared stream if it exists and matches callInfo
+        else if (this.sharedLocalStream) {
+          const hasVideo = this.sharedLocalStream.getVideoTracks().length > 0;
+          const hasAudio = this.sharedLocalStream.getAudioTracks().length > 0;
+          const matches = (callInfo.video === hasVideo || !callInfo.video) && 
+                         (callInfo.audio === hasAudio || !callInfo.audio);
+          if (matches) {
+            console.log("MQTTRTCClient.callUser: ♻️ Reusing shared local stream (tracks:", this.sharedLocalStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+            callStartPromise = this.rtcConnections[user].startCall(this.sharedLocalStream);
+          } else {
+            console.log("MQTTRTCClient.callUser: ⚠️ Shared stream doesn't match callInfo, creating new stream");
+            this.sharedLocalStreamPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
+              console.log("MQTTRTCClient.callUser: 🆕 Created new stream (tracks:", localStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+              this.sharedLocalStream = localStream;
+              this.sharedLocalStreamPromise = null; // Clear promise after resolution
+              return localStream;
+            });
+            callStartPromise = this.sharedLocalStreamPromise.then(stream => {
+              return this.rtcConnections[user].startCall(stream);
+            });
+          }
+        } else {
+          console.log("MQTTRTCClient.callUser: 🆕 Creating first shared local stream");
+          // Create promise and store it IMMEDIATELY to prevent race condition
+          this.sharedLocalStreamPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
+            console.log("MQTTRTCClient.callUser: 🆕 Created first stream (tracks:", localStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+            this.sharedLocalStream = localStream;
+            this.sharedLocalStreamPromise = null; // Clear promise after resolution
+            return localStream;
+          });
+          callStartPromise = this.sharedLocalStreamPromise.then(stream => {
+            return this.rtcConnections[user].startCall(stream);
+          });
+        }
     }
     let callEndPromise = this.rtcConnections[user].callEndPromise.promise;
     return {start: callStartPromise, end: callEndPromise};
   }
   endCallWithUser(user){
-    console.log("Ending call with " + user);
+    console.log("MQTTRTCClient.endCallWithUser: Ending call with " + user);
+    console.log("MQTTRTCClient.endCallWithUser: Available connections:", Object.keys(this.rtcConnections));
     if (this.rtcConnections[user]){
         try {
+            console.log("MQTTRTCClient.endCallWithUser: Calling endCall on RTCConnection for " + user);
             this.rtcConnections[user].endCall();
-            console.log("Sent endcall message to " + user + " via RTC data channel");
+            console.log("MQTTRTCClient.endCallWithUser: Sent endcall message to " + user + " via RTC data channel");
         } catch (err) {
-            console.warn("Failed to send endcall via RTC channel, trying MQTT fallback:", err);
+            console.warn("MQTTRTCClient.endCallWithUser: Failed to send endcall via RTC channel, trying MQTT fallback:", err);
             // Fallback: send via MQTT if RTC channel fails
             try {
                 this.sendOverRTC("endcall", null, user);
-                console.log("Sent endcall message to " + user + " via MQTT fallback");
+                console.log("MQTTRTCClient.endCallWithUser: Sent endcall message to " + user + " via MQTT fallback");
             } catch (mqttErr) {
-                console.error("Failed to send endcall message to " + user + " via both RTC and MQTT:", mqttErr);
+                console.error("MQTTRTCClient.endCallWithUser: Failed to send endcall message to " + user + " via both RTC and MQTT:", mqttErr);
             }
         }
     } else {
-        console.warn("No RTC connection found for " + user + ", cannot send endcall message");
+        console.warn("MQTTRTCClient.endCallWithUser: No RTC connection found for " + user + ", cannot send endcall message");
     }
   }
   callFromUser(user, callInfo, initiatedCall, promises){
     callInfo = callInfo || {video: true, audio: true}
     if (initiatedCall){
-        return navigator.mediaDevices.getUserMedia(callInfo)
+        // CRITICAL: If a stream is being created (pending promise exists), wait for it
+        if (this.sharedLocalStreamPromise) {
+          console.log("MQTTRTCClient.callFromUser: ⏳ Waiting for pending shared stream creation");
+          return this.sharedLocalStreamPromise;
+        }
+        // Reuse shared stream if it exists
+        if (this.sharedLocalStream) {
+          const hasVideo = this.sharedLocalStream.getVideoTracks().length > 0;
+          const hasAudio = this.sharedLocalStream.getAudioTracks().length > 0;
+          const matches = (callInfo.video === hasVideo || !callInfo.video) && 
+                         (callInfo.audio === hasAudio || !callInfo.audio);
+          if (matches) {
+            console.log("MQTTRTCClient.callFromUser: ♻️ Reusing shared local stream (tracks:", this.sharedLocalStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+            return Promise.resolve(this.sharedLocalStream);
+          }
+        }
+        console.log("MQTTRTCClient.callFromUser: 🆕 Creating new shared local stream");
+        this.sharedLocalStreamPromise = navigator.mediaDevices.getUserMedia(callInfo).then(stream => {
+          console.log("MQTTRTCClient.callFromUser: 🆕 Created stream (tracks:", stream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+          this.sharedLocalStream = stream;
+          this.sharedLocalStreamPromise = null; // Clear promise after resolution
+          return stream;
+        });
+        return this.sharedLocalStreamPromise;
     }else{
         return this.acceptCallFromUser(user, callInfo, promises).then(r=> {
             if (r === false || r === null || r === undefined){
@@ -578,7 +705,30 @@ class BaseMQTTRTCClient extends EventEmitter {
             const mediaCallInfo = (typeof r === 'object' && r !== null && (r.video !== undefined || r.audio !== undefined)) 
                 ? r 
                 : callInfo;
-            return navigator.mediaDevices.getUserMedia(mediaCallInfo)
+            // CRITICAL: If a stream is being created (pending promise exists), wait for it
+            if (this.sharedLocalStreamPromise) {
+              console.log("MQTTRTCClient.callFromUser: ⏳ Waiting for pending shared stream creation (incoming)");
+              return this.sharedLocalStreamPromise;
+            }
+            // Reuse shared stream if it exists
+            if (this.sharedLocalStream) {
+              const hasVideo = this.sharedLocalStream.getVideoTracks().length > 0;
+              const hasAudio = this.sharedLocalStream.getAudioTracks().length > 0;
+              const matches = (mediaCallInfo.video === hasVideo || !mediaCallInfo.video) && 
+                             (mediaCallInfo.audio === hasAudio || !mediaCallInfo.audio);
+              if (matches) {
+                console.log("MQTTRTCClient.callFromUser: ♻️ Reusing shared local stream (incoming) (tracks:", this.sharedLocalStream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+                return Promise.resolve(this.sharedLocalStream);
+              }
+            }
+            console.log("MQTTRTCClient.callFromUser: 🆕 Creating new shared local stream (incoming)");
+            this.sharedLocalStreamPromise = navigator.mediaDevices.getUserMedia(mediaCallInfo).then(stream => {
+              console.log("MQTTRTCClient.callFromUser: 🆕 Created stream (incoming) (tracks:", stream.getTracks().map(t => `${t.kind}:${t.id.substring(0,8)}`).join(', '), ")");
+              this.sharedLocalStream = stream;
+              this.sharedLocalStreamPromise = null; // Clear promise after resolution
+              return stream;
+            });
+            return this.sharedLocalStreamPromise;
         })
     }
   }
@@ -609,15 +759,6 @@ class BaseMQTTRTCClient extends EventEmitter {
     this.rtcConnections[user] = rtcConnection;
     rtcConnection.sendOffer();
     return rtcConnection;
-  }
-  _shouldInitiateConnection(peerName) {
-    if (!peerName) {
-      return false;
-    }
-    if (peerName === this.name) {
-      return true;
-    }
-    return this.name.localeCompare(peerName) < 0;
   }
   _shouldInitiateConnection(peerName){
     if (!peerName){
@@ -670,6 +811,13 @@ class BaseMQTTRTCClient extends EventEmitter {
     }
     this.connectingUsers.delete(user);
     this.attemptedPeers.delete(user);
+    
+    // Clear any waiting timeout for this user
+    const waitingTimeout = this.waitingForPeerInitiation.get(user);
+    if (waitingTimeout) {
+        clearTimeout(waitingTimeout);
+        this.waitingForPeerInitiation.delete(user);
+    }
   }
   onConnectedToUser(user){
     console.log("Connected to user ", user);
@@ -1168,22 +1316,71 @@ class RTCConnection {
     }
     _closeCall(){
         console.log("RTCConnection._closeCall: Closing call with " + this.target);
+        
+        // Mark this connection as closed FIRST (before checking others)
+        const wasStreamConnectionActive = !!this.streamConnection;
+        
         if (this.streamConnection){
             this.streamConnection.close();
-            if (this.localStream){
-                this.localStream.getTracks().forEach(track => track.stop());
-            }
+            this.streamConnection = null;
+            
+            // Always stop remote stream tracks (they're specific to this connection)
             if (this.remoteStream){
-                this.remoteStream.getTracks().forEach(track => track.stop());
+                const remoteTracks = this.remoteStream.getTracks();
+                console.log(`RTCConnection._closeCall: Stopping ${remoteTracks.length} remote track(s) for ${this.target}`);
+                remoteTracks.forEach(track => track.stop());
             }
             this.remoteStream = null;
-            this.localStream = null;
+            this.localStream = null; // Clear reference from THIS connection
+        } else {
+            console.log(`RTCConnection._closeCall: No streamConnection for ${this.target}`);
         }
+        
+        // Only check for other connections if THIS connection actually had a stream
+        if (wasStreamConnectionActive) {
+            // Count OTHER connections that still have active streamConnections
+            let otherActiveConnections = 0;
+            const allConnections = [];
+            if (this.mqttClient && this.mqttClient.rtcConnections) {
+                for (const [user, conn] of Object.entries(this.mqttClient.rtcConnections)) {
+                    const hasStreamConn = !!(conn && conn.streamConnection);
+                    allConnections.push(`${user}:${hasStreamConn ? 'active' : 'inactive'}`);
+                    if (user !== this.target && conn && conn.streamConnection) {
+                        otherActiveConnections++;
+                        console.log(`RTCConnection._closeCall: Found other active connection: ${user}`);
+                    }
+                }
+            }
+            
+            console.log(`RTCConnection._closeCall: All connections: [${allConnections.join(', ')}]`);
+            console.log(`RTCConnection._closeCall: ${otherActiveConnections} other active connections remain (excluding ${this.target})`);
+            
+            // Only stop shared stream tracks if NO other connections exist
+            if (otherActiveConnections === 0) {
+                if (this.mqttClient && this.mqttClient.sharedLocalStream) {
+                    console.log(`RTCConnection._closeCall: ✅ Last connection closed, stopping shared stream tracks`);
+                    const tracks = this.mqttClient.sharedLocalStream.getTracks();
+                    console.log(`RTCConnection._closeCall: Shared stream has ${tracks.length} tracks`);
+                    tracks.forEach(track => {
+                        console.log(`RTCConnection._closeCall: 🛑 Stopping ${track.kind} track ${track.id} (readyState: ${track.readyState})`);
+                        track.stop();
+                        console.log(`RTCConnection._closeCall: ✅ Stopped ${track.kind} track ${track.id} (new readyState: ${track.readyState})`);
+                    });
+                    this.mqttClient.sharedLocalStream = null;
+                    this.mqttClient.sharedLocalStreamPromise = null; // Also clear the promise
+                    console.log(`RTCConnection._closeCall: ✅ Shared stream and promise cleared`);
+                } else {
+                    console.log(`RTCConnection._closeCall: No shared stream to stop`);
+                }
+            } else {
+                console.log(`RTCConnection._closeCall: ⏸️  ${otherActiveConnections} other connections still active, keeping shared stream alive`);
+            }
+        }
+        
         this.callEndPromise.resolve();
         this.callEndPromise = new DeferredPromise();
         this.callRinging = false;
         this.initiatedCall = false;
-        this.streamConnection = null;
         this.pendingStreamIceCandidate = null;
         this.streamConnectionPromise = new DeferredPromise();
         this.streamPromise = new DeferredPromise();

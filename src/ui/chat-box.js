@@ -676,6 +676,10 @@ class ChatBox extends HTMLElement {
           this.name = newName;
         }
       });
+      
+      this.chatHeaderComponent.addEventListener('togglecollapse', () => {
+        this._toggleCollapse();
+      });
     }
     
     // MessageInput events
@@ -821,6 +825,46 @@ class ChatBox extends HTMLElement {
   _setupCallButtons() {
     // Call buttons are now handled by MessageInput component
     // Event listeners are set up in _setupComponentEventListeners()
+  }
+
+  /**
+   * Toggle the chat body collapsed/expanded state
+   * @private
+   */
+  _toggleCollapse() {
+    if (this.chatBody) {
+      const isCurrentlyVisible = this.chatBody.classList.contains('visible');
+      
+      if (isCurrentlyVisible) {
+        // Collapse: hide chat body, call management, video, and audio
+        this.chatBody.classList.remove('visible');
+        if (this.callManagementContainer) {
+          this.callManagementContainer.style.display = 'none';
+        }
+        if (this.chatVideo) {
+          this.chatVideo.style.display = 'none';
+        }
+        if (this.chatAudio) {
+          this.chatAudio.style.display = 'none';
+        }
+      } else {
+        // Expand: show chat body and restore call management/media visibility
+        this.chatBody.classList.add('visible');
+        if (this.callManagementContainer) {
+          // Restore call management visibility based on whether it should be active
+          const hasActiveCalls = this.callManagementContainer.classList.contains('active');
+          this.callManagementContainer.style.display = hasActiveCalls ? 'flex' : 'none';
+        }
+        if (this.chatVideo) {
+          // Restore video display (it manages its own visibility based on active streams)
+          this.chatVideo.style.display = '';
+        }
+        if (this.chatAudio) {
+          // Restore audio display (it manages its own visibility based on active streams)
+          this.chatAudio.style.display = '';
+        }
+      }
+    }
   }
 
   /**

@@ -494,9 +494,11 @@ class VideoStreamDisplay extends VideoStreamDisplayBase {
       return;
     }
 
-    // Stop all tracks using base class helper
+    // Only stop REMOTE tracks (local tracks may be shared with other connections)
+    // The RTC layer handles stopping local tracks when appropriate
     if (streamData.streams) {
-      this._stopStreamTracks(streamData.streams.local);
+      // Don't stop local stream tracks - they're managed by RTC layer
+      // this._stopStreamTracks(streamData.streams.local);
       this._stopStreamTracks(streamData.streams.remote);
     }
 

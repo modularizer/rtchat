@@ -323,13 +323,15 @@ class AudioStreamDisplay {
       return;
     }
 
-    // Stop all tracks
+    // Only stop REMOTE tracks (local tracks may be shared with other connections)
+    // The RTC layer handles stopping local tracks when appropriate
     if (streamData.streams) {
-      if (streamData.streams.local) {
-        streamData.streams.local.getTracks().forEach(track => {
-          track.stop();
-        });
-      }
+      // Don't stop local stream tracks - they're managed by RTC layer
+      // if (streamData.streams.local) {
+      //   streamData.streams.local.getTracks().forEach(track => {
+      //     track.stop();
+      //   });
+      // }
       if (streamData.streams.remote) {
         streamData.streams.remote.getTracks().forEach(track => {
           track.stop();

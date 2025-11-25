@@ -127,7 +127,18 @@ export function getDefaults() {
        * - 'require': Require RTCP muxing (recommended, more efficient)
        * - 'negotiate': Allow non-muxed RTCP (for compatibility with older implementations)
        */
-      rtcpMuxPolicy: 'require'
+      rtcpMuxPolicy: 'require',
+      
+      /**
+       * Wait for answer timeout (milliseconds)
+       * - Maximum time to wait for peer to initiate connection
+       * - If peer doesn't initiate within this time, we initiate instead
+       * - Lower values = faster fallback but may cause connection conflicts
+       * - Higher values = more patient waiting but slower connection establishment
+       * - Default: 12000ms (12 seconds)
+       * - Recommended range: 3000-15000ms
+       */
+      waitForAnswerTimeout: 1000
     },
     
     // ============================================================================
