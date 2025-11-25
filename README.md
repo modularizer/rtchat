@@ -38,9 +38,6 @@ Add RTChat to your HTML page with a single script tag:
 ```html
 <!-- Basic usage -->
 <script src="https://modularizer.github.io/rtchat/bundles/rtchat.min.js?add=true"></script>
-
-<!-- With custom options: showRoom, editableRoom, defaultRoom -->
-<!-- <script src="https://modularizer.github.io/rtchat/bundles/rtchat.min.js?add=true&showRoom=false&defaultRoom=myroom"></script> -->
 ```
 
 That's it! A chat widget will automatically appear on your page. Open the page in multiple tabs or share it with others to start chatting.

@@ -1,0 +1,441 @@
+/**
+ * ChatBox Stylesheet
+ * 
+ * Styles for the ChatBox web component.
+ * Uses CSS custom properties for dynamic values like primary user color.
+ */
+
+:host {
+  --primary-user-color: lightblue;
+  --user-colors: lightcoral, lightseagreen, lightsalmon, lightgreen;
+}
+
+.rounded {
+  border-radius: 5px;
+}
+
+.hidden {
+  display: none !important;
+}
+
+.visible {
+  display: block !important;
+}
+
+#chat-container {
+  position: fixed;
+  bottom: 0.5em;
+  right: 0.5em;
+  border: 1px solid #ccc;
+  background-color: #f9f9f9;
+  border-radius: 10px;
+  min-width: 350px;
+  z-index: 9999;
+}
+
+#chat-header {
+  cursor: pointer;
+  background-color: var(--primary-user-color);
+  padding: 10px;
+  font-weight: bold;
+  border-top-left-radius: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+#call-management {
+  display: none;
+  background-color: #f5f5f5;
+  border-top: 2px solid #ddd;
+  border-bottom: 2px solid #ddd;
+  padding: 10px;
+  flex-direction: column;
+  gap: 8px;
+}
+
+#call-management.active {
+  display: flex;
+}
+
+#call-controls-container {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+#call-controls-label {
+  font-weight: bold;
+  margin-right: 8px;
+}
+
+#call-info-container {
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+}
+
+.call-info-item {
+  font-size: 0.85em;
+  padding: 5px 8px;
+  border-radius: 4px;
+  background-color: #e8f5e9;
+  border-left: 3px solid #4caf50;
+}
+
+.call-control-button {
+  padding: 6px 12px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  cursor: pointer;
+  background-color: white;
+  color: orange;
+  font-size: 0.9em;
+}
+
+.call-control-button:hover {
+  background-color: #f0f0f0;
+}
+
+.call-control-button.active {
+  background-color: #ff6b6b;
+  color: white;
+}
+
+.call-control-button.hidden {
+  display: none;
+}
+
+#call-metrics {
+  margin-left: auto;
+  font-size: 0.85em;
+  color: #666;
+}
+
+#room-display {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+#room-display > span:first-child {
+  margin-right: 5px;
+}
+
+#room-display.hidden {
+  display: none;
+}
+
+#room-prefix {
+  color: gray;
+  font-weight: normal;
+}
+
+#chat-header > div:last-child {
+  margin-left: 5px;
+}
+
+#room-name {
+  font-weight: normal;
+  padding: 2px 5px;
+  border-radius: 3px;
+  width: 160px;
+  border: 1px solid #333;
+  background-color: white;
+}
+
+#chat-room-box {
+  display: none;
+}
+
+#chat-room {
+  width: 200px;
+}
+
+#chat-name {
+  width: 200px;
+}
+
+#chat-video {
+  max-height: 40vh;
+  overflow: auto;
+  display: none;
+  padding: 10px;
+}
+
+#chat-video.visible {
+  display: block;
+}
+
+#chat-audio {
+  max-height: 20vh;
+  overflow: auto;
+  display: none;
+  padding: 10px;
+}
+
+#chat-audio.visible {
+  display: block;
+}
+
+.audio-stream-container {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  margin-bottom: 5px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 5px;
+  border-left: 3px solid #4CAF50;
+}
+
+.audio-stream-indicator {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: #4CAF50;
+  animation: pulse 2s infinite;
+}
+
+@keyframes pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.5; }
+}
+
+.audio-stream-label {
+  font-size: 0.9em;
+  color: #333;
+  flex: 1;
+}
+
+.audio-stream-controls {
+  display: flex;
+  gap: 5px;
+}
+
+.audio-stream-mute-btn {
+  padding: 4px 8px;
+  border: 1px solid #ccc;
+  border-radius: 3px;
+  background: white;
+  cursor: pointer;
+  font-size: 0.8em;
+}
+
+.audio-stream-mute-btn:hover {
+  background: #f0f0f0;
+}
+
+.audio-stream-mute-btn.muted {
+  background: #ffebee;
+  border-color: #f44336;
+}
+
+.audio-stream-element {
+  display: none;
+}
+
+.video-stream-container {
+  position: relative;
+  width: 100%;
+  max-width: 100%;
+  margin-bottom: 10px;
+  background: #000;
+  border-radius: 5px;
+  overflow: hidden;
+}
+
+.video-stream-container video {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
+.video-stream-remote {
+  width: 100%;
+}
+
+.video-stream-local {
+  position: absolute;
+  width: 25%;
+  max-width: 25%;
+  top: 10px;
+  right: 10px;
+  border: 2px solid white;
+  box-shadow: 0 0 10px rgba(0, 0, 0, 0.5);
+  border-radius: 5px;
+  background: #000;
+}
+
+#chat-body {
+  max-height: 40vh;
+  overflow: auto;
+  display: none;
+  padding: 10px;
+}
+
+#chat-body.visible {
+  display: block;
+}
+
+#active-users {
+  font-size: 0.8em;
+}
+
+#messages {
+  margin-bottom: 10px;
+}
+
+#input-container {
+  margin-top: 30px;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.call-button {
+  display: none;
+  cursor: pointer;
+  padding: 5px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: white;
+  font-size: 0.9em;
+}
+
+.call-button.visible {
+  display: inline-block;
+}
+
+.call-button.audio-call,
+.call-button.video-call {
+  color: green;
+}
+
+.call-button.end-call {
+  color: red;
+}
+
+.call-button.cancel {
+  color: red;
+}
+
+#input-message {
+  flex: 1;
+  padding: 5px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+}
+
+#input-message:disabled {
+  background-color: #f5f5f5;
+  cursor: not-allowed;
+}
+
+#emoji-button {
+  display: inline-block;
+  cursor: pointer;
+  padding: 5px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: white;
+}
+
+#emoji-button:disabled {
+  background-color: #f5f5f5;
+  cursor: not-allowed;
+}
+
+#clear-button {
+  cursor: pointer;
+  padding: 5px 10px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background-color: white;
+}
+
+#clear-button:disabled {
+  background-color: #f5f5f5;
+  cursor: not-allowed;
+}
+
+/* Message styles */
+.message {
+  padding: 5px 10px;
+  margin: 5px;
+  border-radius: 10px;
+  max-width: 60%;
+}
+
+.message.own-message {
+  background-color: var(--primary-user-color);
+  color: white;
+  margin-left: auto;
+}
+
+.message.other-message {
+  color: black;
+  margin-right: auto;
+}
+
+/* User bubble styles */
+.user-bubble {
+  height: 20px;
+  border-radius: 5px;
+  padding: 0px 5px;
+  display: inline-block;
+  text-align: center;
+  line-height: 20px;
+  color: white;
+  font-size: 12px;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* Notification message styles */
+.notification-message {
+  color: #666;
+  font-size: 0.85em;
+  font-style: italic;
+  margin-bottom: 5px;
+  padding: 5px;
+  border-radius: 3px;
+}
+
+.notification-message.missed-call {
+  background-color: #fff3cd;
+  border-left: 3px solid #ffc107;
+}
+
+.notification-message.declined-call {
+  background-color: #f8d7da;
+  border-left: 3px solid #dc3545;
+}
+
+/* Pinned audio call message */
+.pinned-audio-call {
+  position: sticky;
+  top: 0;
+  z-index: 100;
+  background-color: #e3f2fd;
+  border-left: 4px solid #2196F3;
+  border-radius: 5px;
+  padding: 8px 12px;
+  margin-bottom: 10px;
+  font-size: 0.9em;
+  color: #1976D2;
+  box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.pinned-audio-call.hidden {
+  display: none;
+}
+
+@media only screen and (max-width: 1000px) {
+  #chat-container {
+    min-width: 50vw !important;
+  }
+}
+

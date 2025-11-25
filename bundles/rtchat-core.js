@@ -1373,10 +1373,13 @@ var RTChatCore = (function (exports) {
             // This reduces unnecessary connect messages when already connected
             const hasActiveConnections = Object.keys(this.rtcConnections).some(user => {
               const conn = this.rtcConnections[user];
-              return conn && conn.peerConnection.connectionState === "connected";
+              return conn && conn.peerConnection && 
+                     (conn.peerConnection.connectionState === "connected" || 
+                      conn.peerConnection.connectionState === "completed");
             });
             
-            if (!hasActiveConnections || announcementCount < 5) {
+            // Only announce if no active connections (removed the "announcementCount < 5" condition)
+            if (!hasActiveConnections) {
               this.postPubliclyToMQTTServer("connect", this.userInfo);
             }
             
@@ -1388,7 +1391,9 @@ var RTChatCore = (function (exports) {
               this.announceInterval = setInterval(() => {
                 const hasActiveConnections = Object.keys(this.rtcConnections).some(user => {
                   const conn = this.rtcConnections[user];
-                  return conn && conn.peerConnection.connectionState === "connected";
+                  return conn && conn.peerConnection && 
+                         (conn.peerConnection.connectionState === "connected" || 
+                          conn.peerConnection.connectionState === "completed");
                 });
                 if (!hasActiveConnections) {
                   this.postPubliclyToMQTTServer("connect", this.userInfo);
@@ -1428,7 +1433,7 @@ var RTChatCore = (function (exports) {
               while (this.mqttHistory.length > this.maxHistoryLength){
                   this.mqttHistory.shift();
               }
-              console.log("Received MQTT message on " + this.topic  + " subtopic " + subtopic + " from " + payload.sender, payload.data);
+              // Log removed to reduce console noise
               if (this.mqttHandlers[subtopic]){
                   this.mqttHandlers[subtopic](payload);
               }else {
@@ -1491,7 +1496,16 @@ var RTChatCore = (function (exports) {
         }
       }
       
-      console.log("Sending message to " + this.topic + " subtopic " + subtopic, data);
+      // Reduce logging for frequent messages like ICE candidates
+      if (subtopic === "RTCIceCandidate") {
+        // Only log null candidates (end of ICE gathering) or log at debug level
+        if (!data || data === null) {
+          console.log("Sending message to " + this.topic + " subtopic " + subtopic + " (end of ICE gathering)");
+        }
+        // Otherwise, ICE candidates are sent too frequently to log each one
+      } else {
+        console.log("Sending message to " + this.topic + " subtopic " + subtopic, data);
+      }
       this.client.publish(this.topic, payloadString);
       payload.sent = true;
       this.mqttHistory.push(payload);
@@ -1503,7 +1517,7 @@ var RTChatCore = (function (exports) {
     //____________________________________________________________________________________________________________________
     mqttHandlers = {
       connect: payload => {//connection
-          console.log("Received notice that someone else connected:" + payload.sender, payload, payload.data);
+          // Log removed to reduce console noise
           
           // Check if we're already connected and the connection is healthy
           const existingConnection = this.rtcConnections[payload.sender];
@@ -1514,7 +1528,7 @@ var RTChatCore = (function (exports) {
               // If connection is healthy, ignore this connect message (likely a periodic announcement)
               if (connectionState === "connected" && 
                   (iceConnectionState === "connected" || iceConnectionState === "completed")) {
-                  console.log("Already connected to " + payload.sender + ", ignoring connect message");
+                  // Log removed to reduce console noise
                   this.knownUsers[payload.sender] = payload.data; // Update user info
                   return;
               }
@@ -1524,11 +1538,35 @@ var RTChatCore = (function (exports) {
                   iceConnectionState === "failed" || iceConnectionState === "closed") {
                   console.warn("Connection to " + payload.sender + " is broken, disconnecting");
                   this.disconnectFromUser(payload.sender);
-              } else {
-                  // Connection is in progress (connecting, etc.), don't interfere
-                  console.log("Connection to " + payload.sender + " is in progress (" + connectionState + "), ignoring");
+              } else if (connectionState === "new") {
+                  // Connection is in "new" state - check if it's been stuck for too long
+                  // If it's been more than 10 seconds, allow a retry
+                  const connectionAge = Date.now() - (existingConnection.createdAt || 0);
+                  if (connectionAge > 10000) {
+                      console.warn("Connection to " + payload.sender + " stuck in 'new' state for " + connectionAge + "ms, allowing retry");
+                      this.disconnectFromUser(payload.sender);
+                      // Fall through to create new connection
+                  } else {
+                      // Connection is new but not stuck yet, don't interfere
+                      this.knownUsers[payload.sender] = payload.data; // Update user info
+                      return;
+                  }
+              } else if (connectionState === "connecting") {
+                  // Connection is actively connecting, don't interfere
                   this.knownUsers[payload.sender] = payload.data; // Update user info
                   return;
+              } else {
+                  // Other states (checking, etc.), allow retry if stuck
+                  const connectionAge = Date.now() - (existingConnection.createdAt || 0);
+                  if (connectionAge > 15000) {
+                      console.warn("Connection to " + payload.sender + " stuck in '" + connectionState + "' state for " + connectionAge + "ms, allowing retry");
+                      this.disconnectFromUser(payload.sender);
+                      // Fall through to create new connection
+                  } else {
+                      // Connection is progressing, don't interfere
+                      this.knownUsers[payload.sender] = payload.data; // Update user info
+                      return;
+                  }
               }
           }
           
@@ -1599,15 +1637,13 @@ var RTChatCore = (function (exports) {
       let callStartPromise;
       if (callInfo instanceof MediaStream){
           let localStream = callInfo;
-          callStartPromise = this.rtcConnections[user].startCall(localStream).then(remoteStream => {
-              return {localStream, remoteStream};
-          });
+          // startCall returns a promise that resolves to {localStream, remoteStream}
+          callStartPromise = this.rtcConnections[user].startCall(localStream);
       }else {
           callInfo = callInfo || {video: true, audio: true};
           callStartPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
-              return this.rtcConnections[user].startCall(localStream).then(remoteStream => {
-                  return {localStream, remoteStream};
-              });
+              // startCall returns a promise that resolves to {localStream, remoteStream}
+              return this.rtcConnections[user].startCall(localStream);
           });
       }
       let callEndPromise = this.rtcConnections[user].callEndPromise.promise;
@@ -1625,16 +1661,22 @@ var RTChatCore = (function (exports) {
           return navigator.mediaDevices.getUserMedia(callInfo)
       }else {
           return this.acceptCallFromUser(user, callInfo, promises).then(r=> {
-              if (r){
-                  return navigator.mediaDevices.getUserMedia(callInfo)
-              }else {
+              if (r === false || r === null || r === undefined){
                   return Promise.reject("Call rejected");
               }
+              // If acceptCallFromUser returns modified callInfo (object), use it
+              // Otherwise use the original callInfo
+              const mediaCallInfo = (typeof r === 'object' && r !== null && (r.video !== undefined || r.audio !== undefined)) 
+                  ? r 
+                  : callInfo;
+              return navigator.mediaDevices.getUserMedia(mediaCallInfo)
           })
       }
     }
     oncallended(user){
       console.log("Call ended with " + user);
+      // Emit the callended event so UI components can react
+      this.emit('callended', user);
     }
     acceptCallFromUser(user, callInfo, promises){
        return Promise.resolve(true);
@@ -1811,6 +1853,7 @@ var RTChatCore = (function (exports) {
           this.target = target;
           this.mqttClient = mqttClient;
           this.dataChannels = {};
+          this.createdAt = Date.now(); // Track when connection was created
           this.peerConnection = new RTCPeerConnection(this.rtcConfiguration);
           this.peerConnection.onicecandidate = this.onicecandidate.bind(this);
 
@@ -1875,7 +1918,10 @@ var RTChatCore = (function (exports) {
 
       startCall(stream){
           this.initiatedCall = true;
-          let streamInfo = {video: true, audio: true};//TODO: read from stream
+          // Detect call type from stream tracks
+          const hasVideo = stream.getVideoTracks().length > 0;
+          const hasAudio = stream.getAudioTracks().length > 0;
+          let streamInfo = {video: hasVideo, audio: hasAudio};
           this.streamConnection = this._makeStreamConnection(stream);
 
           this.streamConnection.createOffer()
@@ -1940,7 +1986,12 @@ var RTChatCore = (function (exports) {
       }
       receiveAnswer(answer){
           if (this.peerConnection.signalingState !== 'have-local-offer') {
-              console.warn("Wrong state " + this.peerConnection.signalingState);
+              // This can happen if answer arrives after connection is established or out of order
+              // It's not necessarily an error, just means we can't process this answer
+              if (this.peerConnection.signalingState !== 'stable') {
+                  // Only warn if it's an unexpected state (not just "stable" which is normal)
+                  console.warn("Received answer in unexpected signaling state: " + this.peerConnection.signalingState);
+              }
               return;
           }
           this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
@@ -2000,12 +2051,20 @@ var RTChatCore = (function (exports) {
           if (channel === "streamoffer"){
               console.log("received stream offer", event.data);
               let {offer, streamInfo} = JSON.parse(event.data);
-              this.mqttClient.callFromUser(this.target, {video: true, audio: true}, this.initiatedCall, this.callPromises).then(stream => {
+              // Use streamInfo from the offer if available, otherwise default to video+audio
+              const callInfo = streamInfo || {video: true, audio: true};
+              this.mqttClient.callFromUser(this.target, callInfo, this.initiatedCall, this.callPromises).then(stream => {
                   if (!this.streamConnection){
                       this.streamConnection = this._makeStreamConnection(stream);
                   }
                   return this.streamConnection;
               }).catch(e => {
+                  // If call was rejected, properly end the call
+                  if (e === "Call rejected" || (typeof e === 'string' && e.includes('rejected'))) {
+                      console.log(`Call rejected by ${this.target}, ending call`);
+                      // End the call properly
+                      this.endCall();
+                  }
                   this.streamConnectionPromise.reject(e);
                   this.streamPromise.reject(e);
               }).then(streamConnection => {
@@ -2083,7 +2142,8 @@ var RTChatCore = (function (exports) {
       onstreamicecandidate(event){
           if (event.candidate) {
               // Send ICE candidate via RTC
-              console.log("Sending stream ice", this, event.candidate);
+              // Reduced logging - ICE candidates are sent very frequently during connection setup
+              // console.log("Sending stream ice", this, event.candidate);
               this.send("streamice", JSON.stringify(event.candidate));
           }
       }
@@ -3006,7 +3066,10 @@ var RTChatCore = (function (exports) {
           this.addQuestionHandler('identify', this._returnPublicKey.bind(this));
           this.addQuestionHandler('challenge', this._sign.bind(this));
           this.on('connectedtopeer', (peerName)=>{
-              setTimeout(()=> {this.trustOrChallenge.bind(this)(peerName);}, 1000);
+              // Only validate if not already validated to prevent infinite loops
+              if (!this.validatedPeers.includes(peerName)) {
+                  setTimeout(()=> {this.trustOrChallenge.bind(this)(peerName);}, 1000);
+              }
           });
 
           if (load) {
@@ -3360,8 +3423,11 @@ var RTChatCore = (function (exports) {
                           }
                       }
                       this.keys.savePublicKeyString(peerName, publicKeyString);
-                      this.onValidatedPeer(peerName, true);
-                      this.validatedPeers.push(peerName);
+                      // Only add to validatedPeers if not already there (prevent duplicates)
+                      if (!this.validatedPeers.includes(peerName)) {
+                          this.validatedPeers.push(peerName);
+                          this.onValidatedPeer(peerName, true);
+                      }
                       return true;
                   } else {
                       console.error("Signature invalid for " + peerName);
@@ -3380,9 +3446,12 @@ var RTChatCore = (function (exports) {
           return this.sendRTCQuestion("challenge", challengeString, peerName).then((signature) => {
               return this.keys.verify(publicKeyString, signature, challengeString).then((valid) => {
                   console.log("Signature valid for " + peerName, valid);
-                  this.validatedPeers.push(peerName);
-                  console.log("Validated peers", this.validatedPeers);
-                  this.onValidatedPeer(peerName);
+                  // Only add to validatedPeers if not already there (prevent duplicates)
+                  if (!this.validatedPeers.includes(peerName)) {
+                      this.validatedPeers.push(peerName);
+                      console.log("Validated peers", this.validatedPeers);
+                      this.onValidatedPeer(peerName);
+                  }
 
                   return valid;
               }, (err) => {
@@ -3408,6 +3477,8 @@ var RTChatCore = (function (exports) {
           }
           console.log("Peer " + peerName + " validated");
           this.emit('validation', peerName, trusting);
+          // Don't emit connectedtopeer here - it causes infinite loops
+          // ChatManager now listens to 'validation' events to add users after validation
       }
       onValidationFailed(peerName, message) {
           console.error("Peer " + peerName + " validation failed" + (message ? ": " + message : ""));
@@ -3428,7 +3499,2093 @@ var RTChatCore = (function (exports) {
       register(identity) {return this.keys.register(identity);}
   }
 
+  /**
+   * CallState - Platform-agnostic, UI-agnostic call state management
+   * 
+   * This module provides a structured way to track call state per user.
+   * State can be: inactive, active, or pending
+   * Each state can have audio and/or video capabilities.
+   * 
+   * Usage:
+   *   import { CallState } from './call-state.js';
+   *   
+   *   const callState = new CallState();
+   *   callState.setUserState('user1', {status: 'active', audio: true, video: true});
+   *   const state = callState.getUserState('user1');
+   *   // {status: 'active', audio: true, video: true}
+   * 
+   * @module call-state
+   */
+
+  class CallState {
+    /**
+     * Create a new CallState instance
+     */
+    constructor() {
+      // Map<user, {status: 'inactive'|'active'|'pending', audio: boolean, video: boolean}>
+      this._userStates = new Map();
+    }
+
+    /**
+     * Set call state for a user
+     * @param {string} user - User name
+     * @param {Object} state - State object {status: string, audio: boolean, video: boolean}
+     */
+    setUserState(user, state) {
+      if (!user) {
+        throw new Error('User name is required');
+      }
+      
+      const normalizedState = {
+        status: state.status || 'inactive',
+        audio: state.audio === true,
+        video: state.video === true
+      };
+      
+      // Validate status
+      if (!['inactive', 'active', 'pending'].includes(normalizedState.status)) {
+        throw new Error(`Invalid status: ${normalizedState.status}. Must be 'inactive', 'active', or 'pending'`);
+      }
+      
+      this._userStates.set(user, normalizedState);
+    }
+
+    /**
+     * Get call state for a user
+     * @param {string} user - User name
+     * @returns {Object|null} State object {status: string, audio: boolean, video: boolean} or null if not found
+     */
+    getUserState(user) {
+      if (!user) {
+        return null;
+      }
+      const state = this._userStates.get(user);
+      return state ? { ...state } : null;
+    }
+
+    /**
+     * Get all users with a specific status
+     * @param {string} status - Status to filter by ('inactive', 'active', or 'pending')
+     * @returns {Array<string>} Array of user names
+     */
+    getUsersByStatus(status) {
+      if (!['inactive', 'active', 'pending'].includes(status)) {
+        throw new Error(`Invalid status: ${status}. Must be 'inactive', 'active', or 'pending'`);
+      }
+      
+      const users = [];
+      for (const [user, state] of this._userStates.entries()) {
+        if (state.status === status) {
+          users.push(user);
+        }
+      }
+      return users;
+    }
+
+    /**
+     * Get all active calls (grouped by audio/video)
+     * @returns {Object} {audio: Set<string>, video: Set<string>}
+     */
+    getActiveCalls() {
+      const audio = new Set();
+      const video = new Set();
+      
+      for (const [user, state] of this._userStates.entries()) {
+        if (state.status === 'active') {
+          if (state.audio) {
+            audio.add(user);
+          }
+          if (state.video) {
+            video.add(user);
+          }
+        }
+      }
+      
+      return { audio, video };
+    }
+
+    /**
+     * Get all pending calls
+     * @returns {Set<string>} Set of user names with pending calls
+     */
+    getPendingCalls() {
+      return new Set(this.getUsersByStatus('pending'));
+    }
+
+    /**
+     * Get all users with active or pending calls
+     * @returns {Set<string>} Set of user names
+     */
+    getActiveOrPendingCalls() {
+      const users = new Set();
+      for (const [user, state] of this._userStates.entries()) {
+        if (state.status === 'active' || state.status === 'pending') {
+          users.add(user);
+        }
+      }
+      return users;
+    }
+
+    /**
+     * Check if a user has an active call
+     * @param {string} user - User name
+     * @returns {boolean} True if user has an active call
+     */
+    hasActiveCall(user) {
+      const state = this.getUserState(user);
+      return state && state.status === 'active';
+    }
+
+    /**
+     * Check if a user has a pending call
+     * @param {string} user - User name
+     * @returns {boolean} True if user has a pending call
+     */
+    hasPendingCall(user) {
+      const state = this.getUserState(user);
+      return state && state.status === 'pending';
+    }
+
+    /**
+     * Remove state for a user
+     * @param {string} user - User name
+     */
+    removeUser(user) {
+      this._userStates.delete(user);
+    }
+
+    /**
+     * Clear all states
+     */
+    clear() {
+      this._userStates.clear();
+    }
+
+    /**
+     * Get all states (for debugging/inspection)
+     * @returns {Map} Map of user -> state
+     */
+    getAllStates() {
+      return new Map(this._userStates);
+    }
+  }
+
+  /**
+   * CallManager - Platform-agnostic call state and business logic management
+   * 
+   * This class manages all call-related business logic without any UI dependencies.
+   * It tracks call state, manages mute states, handles timeouts, and collects statistics.
+   * 
+   * Usage:
+   *   import { CallManager } from './call-manager.js';
+   *   import { EventEmitter } from './event-emitter.js';
+   *   
+   *   const callManager = new CallManager(rtcClient);
+   *   callManager.on('callstarted', (user, type) => { ... });
+   *   callManager.on('callended', (user) => { ... });
+   *   callManager.on('mutechanged', ({mic, speakers, video}) => { ... });
+   *   
+   *   // Start a call
+   *   await callManager.startCall(user, 'audio');
+   *   
+   *   // Mute/unmute
+   *   callManager.setMicMuted(true);
+   *   callManager.setSpeakersMuted(true);
+   *   callManager.setVideoHidden(true);
+   * 
+   * Features:
+   * - Call state tracking (active calls, pending calls, outgoing calls)
+   * - Mute state management (mic, speakers, video)
+   * - Call timeout handling
+   * - Connection statistics collection
+   * - Event-driven architecture
+   * 
+   * @module call-manager
+   */
+
+
+  class CallManager extends EventEmitter {
+    /**
+     * Create a new CallManager instance
+     * @param {Object} rtcClient - RTC client instance (MQTTRTCClient or similar)
+     * @param {Object} options - Configuration options
+     * @param {number} options.callTimeout - Call timeout in milliseconds (default: 15000)
+     * @param {number} options.statsPollInterval - Stats polling interval in milliseconds (default: 2000)
+     * @param {CallUIInterface} options.callUI - Optional call UI component implementing CallUIInterface
+     * @param {StreamDisplayInterface} options.videoDisplay - Optional video display component
+     * @param {StreamDisplayInterface} options.audioDisplay - Optional audio display component
+     * @param {AudioControllerInterface} options.audioController - Optional audio controller
+     * @param {VideoControllerInterface} options.videoController - Optional video controller
+     * @param {RingerInterface} options.ringer - Optional ringtone component
+     * @param {NotificationInterface} options.notifications - Optional notification component
+     */
+    constructor(rtcClient, options = {}) {
+      super();
+      
+      this.rtcClient = rtcClient;
+      this.options = {
+        callTimeout: options.callTimeout || 15000,
+        statsPollInterval: options.statsPollInterval || 2000,
+        ...options
+      };
+      
+      // Optional UI components
+      this.callUI = options.callUI || null;
+      this.videoDisplay = options.videoDisplay || null;
+      this.audioDisplay = options.audioDisplay || null;
+      this.audioController = options.audioController || null;
+      this.videoController = options.videoController || null;
+      this.ringer = options.ringer || null;
+      this.notifications = options.notifications || null;
+      
+      // Unified call state tracking (platform-agnostic, UI-agnostic)
+      this.callState = new CallState();
+      
+      // Additional metadata tracking (not part of core state)
+      this.pendingCalls = new Map(); // Map<user, {callInfo, promises, timeoutId, promptElement}>
+      this.outgoingCalls = new Map(); // Map<user, {type, cancelFn, timeoutId}>
+      this.localStreams = new Map(); // Map<user, MediaStream>
+      
+      // Mute state
+      this.muteState = {
+        mic: false,
+        speakers: false,
+        video: false
+      };
+      
+      // Statistics
+      this.statsInterval = null;
+      this.latencyMetrics = new Map(); // Map<user, {rtt, packetLoss, jitter}>
+      
+      // Bind methods
+      this._handleIncomingCall = this._handleIncomingCall.bind(this);
+      this._handleCallConnected = this._handleCallConnected.bind(this);
+      this._handleCallEnded = this._handleCallEnded.bind(this);
+      
+      // Setup RTC client event listeners if available
+      if (rtcClient) {
+        this._setupRTCEventListeners();
+      }
+    }
+
+    /**
+     * Setup event listeners on RTC client
+     * @private
+     */
+    _setupRTCEventListeners() {
+      if (this.rtcClient.on) {
+        this.rtcClient.on('call', this._handleIncomingCall);
+        this.rtcClient.on('callconnected', this._handleCallConnected);
+        this.rtcClient.on('callended', this._handleCallEnded);
+        this.rtcClient.on('disconnectedfrompeer', (user) => {
+          this._handleDisconnectedFromUser(user);
+        });
+      }
+    }
+
+    /**
+     * Handle incoming call from RTC client
+     * @param {string} peerName - Name of the peer calling
+     * @param {Object} callInfo - Call information {video: boolean, audio: boolean}
+     * @param {Object} promises - Call promises {start: Promise, end: Promise}
+     * @returns {Promise} Promise that resolves to acceptance result
+     * @private
+     */
+    _handleIncomingCall(peerName, callInfo, promises) {
+      console.log('CallManager._handleIncomingCall called', { peerName, callInfo, hasRinger: !!this.ringer });
+      
+      // Set up timeout for unanswered call
+      const timeoutId = setTimeout(() => {
+        this._handleCallTimeout(peerName, 'incoming');
+      }, this.options.callTimeout);
+      
+      // Track pending call
+      this.pendingCalls.set(peerName, {
+        callInfo,
+        promises,
+        timeoutId,
+        promptElement: null // UI can set this
+      });
+      
+      // Update unified call state
+      this.callState.setUserState(peerName, {
+        status: 'pending',
+        audio: callInfo.audio !== false, // Default to true if not specified
+        video: callInfo.video === true
+      });
+      
+      // Start ringing if ringer is provided
+      if (this.ringer && typeof this.ringer.start === 'function') {
+        console.log('Starting ringtone...');
+        this.ringer.start().catch(err => {
+          console.error('Could not start ringtone:', err);
+        });
+      } else {
+        console.warn('No ringer available or ringer.start is not a function', { 
+          hasRinger: !!this.ringer, 
+          ringerType: this.ringer ? typeof this.ringer : 'undefined',
+          hasStart: this.ringer ? typeof this.ringer.start : 'N/A'
+        });
+      }
+      
+      // Emit event for UI to handle
+      this.emit('incomingcall', {
+        peerName,
+        callInfo,
+        promises,
+        timeoutId
+      });
+      
+      // Use callUI if provided, otherwise auto-accept
+      if (this.callUI && typeof this.callUI.showIncomingCallPrompt === 'function') {
+        return this.callUI.showIncomingCallPrompt(peerName, callInfo);
+      }
+      
+      // Default: auto-accept
+      return Promise.resolve(true);
+    }
+
+    /**
+     * Handle call connected event
+     * @param {string} sender - Name of the peer
+     * @param {Object} streams - Stream objects {localStream, remoteStream}
+     * @private
+     */
+    _handleCallConnected(sender, {localStream, remoteStream}) {
+      // Clear timeout
+      const pendingCall = this.pendingCalls.get(sender);
+      if (pendingCall && pendingCall.timeoutId) {
+        clearTimeout(pendingCall.timeoutId);
+        pendingCall.timeoutId = null;
+      }
+      this.pendingCalls.delete(sender);
+      
+      // Stop ringing if ringer is provided
+      if (this.ringer && typeof this.ringer.stop === 'function') {
+        this.ringer.stop();
+      }
+      
+      // Determine call type
+      const hasVideo = localStream?.getVideoTracks().length > 0 || 
+                       remoteStream?.getVideoTracks().length > 0;
+      const hasAudio = localStream?.getAudioTracks().length > 0 || 
+                       remoteStream?.getAudioTracks().length > 0;
+      
+      // Store local stream
+      if (localStream instanceof MediaStream) {
+        this.localStreams.set(sender, localStream);
+      }
+      
+      // Update unified call state
+      this.callState.setUserState(sender, {
+        status: 'active',
+        audio: hasAudio,
+        video: hasVideo
+      });
+      
+      // Start stats polling if not already started
+      const activeCalls = this.callState.getActiveCalls();
+      if (!this.statsInterval && (activeCalls.video.size > 0 || activeCalls.audio.size > 0)) {
+        this._startStatsPolling();
+      }
+      
+      // Emit event
+      this.emit('callconnected', {
+        sender,
+        localStream,
+        remoteStream,
+        type: hasVideo ? 'video' : 'audio'
+      });
+      
+      // Use stream displays if provided
+      if (hasVideo && this.videoDisplay && typeof this.videoDisplay.setStreams === 'function') {
+        this.videoDisplay.setStreams(sender, { localStream, remoteStream });
+      } else if (hasAudio && this.audioDisplay && typeof this.audioDisplay.setStreams === 'function') {
+        this.audioDisplay.setStreams(sender, { localStream, remoteStream });
+      }
+    }
+
+    /**
+     * Handle call ended event
+     * @param {string} peerName - Name of the peer
+     * @private
+     */
+    _handleCallEnded(peerName) {
+      // Clear timeouts
+      const pendingCall = this.pendingCalls.get(peerName);
+      if (pendingCall && pendingCall.timeoutId) {
+        clearTimeout(pendingCall.timeoutId);
+      }
+      this.pendingCalls.delete(peerName);
+      
+      const outgoingCall = this.outgoingCalls.get(peerName);
+      if (outgoingCall && outgoingCall.timeoutId) {
+        clearTimeout(outgoingCall.timeoutId);
+      }
+      this.outgoingCalls.delete(peerName);
+      
+      // Update unified call state
+      this.callState.setUserState(peerName, {
+        status: 'inactive',
+        audio: false,
+        video: false
+      });
+      
+      this.localStreams.delete(peerName);
+      this.latencyMetrics.delete(peerName);
+      
+      // Stop stats polling if no active calls
+      const activeCalls = this.callState.getActiveCalls();
+      if (activeCalls.video.size === 0 && activeCalls.audio.size === 0) {
+        this._stopStatsPolling();
+        // Reset mute states
+        this.muteState = { mic: false, speakers: false, video: false };
+      }
+      
+      // Emit event
+      this.emit('callended', { peerName });
+    }
+
+    /**
+     * Handle call timeout
+     * @param {string} peerName - Name of the peer
+     * @param {string} direction - 'incoming' or 'outgoing'
+     * @private
+     */
+    _handleCallTimeout(peerName, direction) {
+      // Clear pending/outgoing call
+      this.pendingCalls.delete(peerName);
+      this.outgoingCalls.delete(peerName);
+      
+      // End call with RTC client
+      if (this.rtcClient && this.rtcClient.endCallWithUser) {
+        try {
+          this.rtcClient.endCallWithUser(peerName);
+        } catch (err) {
+          console.warn(`Error ending timed out call:`, err);
+        }
+      }
+      
+      // Update unified call state
+      this.callState.setUserState(peerName, {
+        status: 'inactive',
+        audio: false,
+        video: false
+      });
+      
+      this.localStreams.delete(peerName);
+      this.latencyMetrics.delete(peerName);
+      
+      // Stop ringing if ringer is provided
+      if (this.ringer && typeof this.ringer.stop === 'function') {
+        this.ringer.stop();
+      }
+      
+      // Emit event
+      this.emit('calltimeout', { peerName, direction });
+      
+      // Use callUI if provided
+      if (this.callUI && typeof this.callUI.showMissedCallNotification === 'function') {
+        this.callUI.showMissedCallNotification(peerName, direction);
+      }
+      
+      // Clean up stream displays
+      if (this.videoDisplay && typeof this.videoDisplay.removeStreams === 'function') {
+        this.videoDisplay.removeStreams(peerName);
+      }
+      if (this.audioDisplay && typeof this.audioDisplay.removeStreams === 'function') {
+        this.audioDisplay.removeStreams(peerName);
+      }
+    }
+
+    /**
+     * Handle user disconnection
+     * @param {string} user - Name of the user
+     * @private
+     */
+    _handleDisconnectedFromUser(user) {
+      const userState = this.callState.getUserState(user);
+      const hasActiveOrPendingCall = userState && (userState.status === 'active' || userState.status === 'pending');
+      const hasOutgoingCall = this.outgoingCalls.has(user);
+      
+      if (hasActiveOrPendingCall || hasOutgoingCall) {
+        // End call with disconnected user
+        if (this.rtcClient && this.rtcClient.endCallWithUser) {
+          try {
+            this.rtcClient.endCallWithUser(user);
+          } catch (err) {
+            console.warn(`Error ending call with disconnected user:`, err);
+          }
+        }
+        
+        this._handleCallEnded(user);
+      }
+    }
+
+    /**
+     * Start a call with a user
+     * @param {string} user - Name of the user to call
+     * @param {string} type - 'audio' or 'video'
+     * @returns {Promise} Promise that resolves when call starts
+     */
+    async startCall(user, type) {
+      if (!this.rtcClient || !this.rtcClient.callUser) {
+        throw new Error('RTC client not available or does not support callUser');
+      }
+      
+      const callInfo = type === 'audio' 
+        ? { video: false, audio: true }
+        : { video: true, audio: true };
+      
+      // Create cancel function
+      let timeoutId = null;
+      const cancelCall = (reason = 'cancelled') => {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        this.outgoingCalls.delete(user);
+        if (this.rtcClient && this.rtcClient.endCallWithUser) {
+          try {
+            this.rtcClient.endCallWithUser(user);
+          } catch (err) {
+            console.error(`Error canceling call:`, err);
+          }
+        }
+        this.emit('callcancelled', { user, reason });
+      };
+      
+      // Set up timeout
+      timeoutId = setTimeout(() => {
+        this._handleCallTimeout(user, 'outgoing');
+      }, this.options.callTimeout);
+      
+      // Track outgoing call
+      this.outgoingCalls.set(user, {
+        type,
+        cancelFn: cancelCall,
+        timeoutId
+      });
+      
+      try {
+        // Start the call - callUser returns {start, end} promises
+        const { start, end } = this.rtcClient.callUser(user, callInfo);
+        
+        // Await the start promise to get the streams
+        const streamResult = await start;
+        
+        // Clear timeout if call started successfully
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        
+        // If streamResult contains streams, handle them
+        if (streamResult && (streamResult.localStream || streamResult.remoteStream)) {
+          this._handleCallConnected(user, streamResult);
+        }
+        
+        // Emit event
+        this.emit('callstarted', { user, type });
+        
+        // Return the stream result and end promise
+        return { ...streamResult, end };
+      } catch (err) {
+        // Clear timeout
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+        }
+        this.outgoingCalls.delete(user);
+        
+        // Check if call was rejected
+        if (err === "Call rejected" || err?.message === "Call rejected") {
+          this.emit('callrejected', { user });
+        } else {
+          this.emit('callerror', { user, error: err });
+        }
+        
+        throw err;
+      }
+    }
+
+    /**
+     * End a call with a user
+     * @param {string} user - Name of the user
+     */
+    endCall(user) {
+      if (this.rtcClient && this.rtcClient.endCallWithUser) {
+        try {
+          this.rtcClient.endCallWithUser(user);
+        } catch (err) {
+          console.error(`Error ending call:`, err);
+        }
+      }
+      
+      // Cleanup will happen via callended event
+    }
+
+    /**
+     * End all active calls
+     */
+    endAllCalls() {
+      const activeCalls = this.callState.getActiveCalls();
+      const pendingCalls = this.callState.getPendingCalls();
+      const allUsers = new Set([...activeCalls.video, ...activeCalls.audio, ...pendingCalls, ...this.outgoingCalls.keys()]);
+      for (const user of allUsers) {
+        this.endCall(user);
+      }
+    }
+
+    /**
+     * Set microphone mute state
+     * @param {boolean} muted - Whether microphone is muted
+     */
+    setMicMuted(muted) {
+      this.muteState.mic = muted;
+      
+      // Update all local streams
+      for (const [user, stream] of this.localStreams.entries()) {
+        if (stream && stream instanceof MediaStream) {
+          const audioTracks = stream.getAudioTracks();
+          audioTracks.forEach(track => {
+            track.enabled = !muted;
+          });
+        }
+      }
+      
+      this.emit('mutechanged', { ...this.muteState });
+    }
+
+    /**
+     * Set speakers mute state
+     * @param {boolean} muted - Whether speakers are muted
+     */
+    setSpeakersMuted(muted) {
+      this.muteState.speakers = muted;
+      
+      // Note: Speakers muting requires UI to handle remote audio/video elements
+      // This just tracks the state and emits event
+      this.emit('mutechanged', { ...this.muteState });
+      this.emit('speakersmutechanged', { muted });
+    }
+
+    /**
+     * Set video hidden state
+     * @param {boolean} hidden - Whether video is hidden
+     */
+    setVideoHidden(hidden) {
+      this.muteState.video = hidden;
+      
+      // Update all local streams
+      for (const [user, stream] of this.localStreams.entries()) {
+        if (stream && stream instanceof MediaStream) {
+          const videoTracks = stream.getVideoTracks();
+          videoTracks.forEach(track => {
+            track.enabled = !hidden;
+          });
+        }
+      }
+      
+      // Use videoController if provided
+      if (this.videoController && typeof this.videoController.setVideoHidden === 'function') {
+        this.videoController.setVideoHidden(hidden, this.localStreams);
+      }
+      
+      this.emit('mutechanged', { ...this.muteState });
+    }
+
+    /**
+     * Get current mute state
+     * @returns {Object} Mute state {mic: boolean, speakers: boolean, video: boolean}
+     */
+    getMuteState() {
+      return { ...this.muteState };
+    }
+
+    /**
+     * Get active calls
+     * @returns {Object} {audio: Set, video: Set}
+     */
+    getActiveCalls() {
+      // Use unified call state as source of truth
+      return this.callState.getActiveCalls();
+    }
+
+    /**
+     * Get pending incoming calls
+     * @returns {Set} Set of user names with pending incoming calls
+     */
+    getPendingCalls() {
+      // Use unified call state as source of truth
+      return this.callState.getPendingCalls();
+    }
+
+    /**
+     * Get call state for a user
+     * @param {string} user - User name
+     * @returns {Object|null} State object {status: string, audio: boolean, video: boolean} or null
+     */
+    getUserCallState(user) {
+      return this.callState.getUserState(user);
+    }
+
+    /**
+     * Get all call states
+     * @returns {Map} Map of user -> state
+     */
+    getAllCallStates() {
+      return this.callState.getAllStates();
+    }
+
+    /**
+     * Get latency metrics for a user
+     * @param {string} user - User name
+     * @returns {Object|null} Metrics {rtt, packetLoss, jitter} or null
+     */
+    getMetrics(user) {
+      return this.latencyMetrics.get(user) || null;
+    }
+
+    /**
+     * Get all latency metrics
+     * @returns {Map} Map of user -> metrics
+     */
+    getAllMetrics() {
+      return new Map(this.latencyMetrics);
+    }
+
+    /**
+     * Start polling connection statistics
+     * @private
+     */
+    _startStatsPolling() {
+      if (this.statsInterval) {
+        return;
+      }
+      
+      this.statsInterval = setInterval(() => {
+        this._collectConnectionStats();
+      }, this.options.statsPollInterval);
+      
+      // Collect initial stats
+      this._collectConnectionStats();
+    }
+
+    /**
+     * Stop polling connection statistics
+     * @private
+     */
+    _stopStatsPolling() {
+      if (this.statsInterval) {
+        clearInterval(this.statsInterval);
+        this.statsInterval = null;
+      }
+    }
+
+    /**
+     * Collect connection statistics from active calls
+     * @private
+     */
+    async _collectConnectionStats() {
+      if (!this.rtcClient || !this.rtcClient.rtcConnections) {
+        return;
+      }
+      
+      const activeCalls = this.callState.getActiveCalls();
+      const activeCallUsers = new Set([...activeCalls.video, ...activeCalls.audio]);
+      
+      for (const user of activeCallUsers) {
+        const connection = this.rtcClient.rtcConnections[user];
+        if (!connection) {
+          continue;
+        }
+        
+        try {
+          const streamConnection = connection.streamConnection;
+          if (streamConnection && streamConnection.connectionState === 'connected') {
+            const stats = await streamConnection.getStats();
+            
+            let rtt = null;
+            let packetLoss = null;
+            let jitter = null;
+            
+            // Parse stats
+            for (const [id, report] of stats.entries()) {
+              if (report.type === 'candidate-pair' && report.state === 'succeeded') {
+                if (report.currentRoundTripTime !== undefined) {
+                  rtt = report.currentRoundTripTime * 1000; // Convert to ms
+                }
+              }
+              
+              if (report.type === 'inbound-rtp' && report.mediaType === 'audio') {
+                if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
+                  const totalPackets = report.packetsLost + report.packetsReceived;
+                  if (totalPackets > 0) {
+                    packetLoss = (report.packetsLost / totalPackets) * 100;
+                  }
+                }
+                if (report.jitter !== undefined) {
+                  jitter = report.jitter * 1000; // Convert to ms
+                }
+              }
+              
+              if (report.type === 'inbound-rtp' && report.mediaType === 'video') {
+                if (report.packetsLost !== undefined && report.packetsReceived !== undefined) {
+                  const totalPackets = report.packetsLost + report.packetsReceived;
+                  if (totalPackets > 0) {
+                    const videoPacketLoss = (report.packetsLost / totalPackets) * 100;
+                    if (packetLoss === null) {
+                      packetLoss = videoPacketLoss;
+                    }
+                  }
+                }
+              }
+            }
+            
+            // Store metrics
+            this.latencyMetrics.set(user, { rtt, packetLoss, jitter });
+            
+            // Emit event
+            this.emit('metricsupdated', { user, metrics: { rtt, packetLoss, jitter } });
+          }
+        } catch (err) {
+          console.warn(`Error collecting stats for ${user}:`, err);
+        }
+      }
+    }
+
+    /**
+     * Cleanup and destroy the manager
+     */
+    destroy() {
+      // Stop stats polling
+      this._stopStatsPolling();
+      
+      // End all calls
+      this.endAllCalls();
+      
+      // Clear all state
+      this.pendingCalls.clear();
+      this.outgoingCalls.clear();
+      this.localStreams.clear();
+      this.latencyMetrics.clear();
+      
+      // Clear unified call state
+      this.callState.clear();
+      
+      // Remove event listeners
+      if (this.rtcClient && this.rtcClient.off) {
+        this.rtcClient.off('call', this._handleIncomingCall);
+        this.rtcClient.off('callconnected', this._handleCallConnected);
+        this.rtcClient.off('callended', this._handleCallEnded);
+      }
+      
+      // Remove all event listeners
+      this.removeAllListeners();
+    }
+  }
+
+  /**
+   * ChatManager - Platform-agnostic chat message and state management
+   * 
+   * This class manages chat-related business logic without any UI dependencies.
+   * It tracks messages, active users, and provides a clean API for chat operations.
+   * 
+   * Usage:
+   *   import { ChatManager } from './chat-manager.js';
+   *   import { EventEmitter } from './event-emitter.js';
+   *   
+   *   const chatManager = new ChatManager(rtcClient);
+   *   chatManager.on('message', ({data, sender, timestamp}) => { ... });
+   *   chatManager.on('userconnected', (user) => { ... });
+   *   chatManager.on('userdisconnected', (user) => { ... });
+   *   
+   *   // Send a message
+   *   chatManager.sendMessage('Hello!');
+   * 
+   * Features:
+   * - Message history tracking
+   * - Active user management
+   * - User color assignment
+   * - Event-driven architecture
+   * 
+   * @module chat-manager
+   */
+
+
+  class ChatManager extends EventEmitter {
+    /**
+     * Create a new ChatManager instance
+     * @param {Object} rtcClient - RTC client instance (MQTTRTCClient or similar)
+     * @param {Object} options - Configuration options
+     * @param {string} options.primaryUserColor - Color for primary user messages (default: 'lightblue')
+     * @param {Array<string>} options.userColors - Array of colors for other users
+     * @param {ChatUIInterface} options.chatUI - Optional chat UI component implementing ChatUIInterface
+     * @param {NotificationInterface} options.notifications - Optional notification component
+     */
+    constructor(rtcClient, options = {}) {
+      super();
+      
+      this.rtcClient = rtcClient;
+      this.options = {
+        primaryUserColor: options.primaryUserColor || 'lightblue',
+        userColors: options.userColors || [
+          'lightcoral',
+          'lightseagreen',
+          'lightsalmon',
+          'lightgreen',
+        ],
+        ...options
+      };
+      
+      // Optional UI components
+      this.chatUI = options.chatUI || null;
+      this.notifications = options.notifications || null;
+      
+      // State tracking
+      this.history = [];
+      this.activeUsers = [];
+      this.userColors = [...this.options.userColors];
+      this.name = options.name || '?';
+      
+      // Bind methods
+      this._handleChatMessage = this._handleChatMessage.bind(this);
+      this._handleUserConnected = this._handleUserConnected.bind(this);
+      this._handleUserDisconnected = this._handleUserDisconnected.bind(this);
+      
+      // Setup RTC client event listeners if available
+      if (rtcClient) {
+        this._setupRTCEventListeners();
+      }
+    }
+
+    /**
+     * Setup event listeners on RTC client
+     * @private
+     */
+    _setupRTCEventListeners() {
+      if (this.rtcClient.on) {
+        this.rtcClient.on('chat', this._handleChatMessage);
+        
+        // Check if this is a SignedMQTTRTCClient (has validation events)
+        // For SignedMQTTRTCClient, we should wait for validation before adding users
+        // For regular MQTTRTCClient, we can add users immediately on connectedtopeer
+        // Detection: check if validatedPeers property exists (more reliable than constructor.name)
+        const isSignedClient = this.rtcClient && 
+                              (this.rtcClient.validatedPeers !== undefined || 
+                               (this.rtcClient.on && typeof this.rtcClient.on === 'function'));
+        
+        // Also check if validation event is available by trying to listen
+        // For now, we'll listen to both events and handle appropriately
+        
+        // Always listen to validation event if available (for SignedMQTTRTCClient)
+        // This won't cause issues for regular clients that don't emit it
+        this.rtcClient.on('validation', (peerName, trusted) => {
+          console.log('ChatManager: Received validation event for', peerName, 'trusted:', trusted);
+          // Add user after validation if not already added
+          if (!this.activeUsers.includes(peerName)) {
+            console.log('ChatManager: Adding validated user', peerName);
+            this._handleUserConnected(peerName);
+          } else {
+            console.log('ChatManager: User', peerName, 'already in activeUsers');
+          }
+        });
+        
+        // For connectedtopeer: only add users if NOT using SignedMQTTRTCClient
+        // (SignedMQTTRTCClient will add via validation event instead)
+        this.rtcClient.on('connectedtopeer', (peerName) => {
+          // Only add immediately if this is NOT a signed client
+          // For signed clients, wait for validation event
+          if (!isSignedClient) {
+            console.log('ChatManager: Adding user on connectedtopeer (non-signed client)', peerName);
+            this._handleUserConnected(peerName);
+          } else {
+            console.log('ChatManager: Received connectedtopeer for', peerName, '(waiting for validation)');
+          }
+        });
+        
+        this.rtcClient.on('disconnectedfrompeer', this._handleUserDisconnected);
+      }
+    }
+
+    /**
+     * Handle chat message from RTC client
+     * @param {string} message - Message content
+     * @param {string} sender - Sender name
+     * @private
+     */
+    _handleChatMessage(message, sender) {
+      const timestamp = Date.now();
+      const messageData = {
+        data: message,
+        sender,
+        timestamp
+      };
+      
+      // Add to history
+      this.history.push(messageData);
+      
+      // Emit event - UI should listen to this event, not use direct displayMessage call
+      this.emit('message', messageData);
+      
+      // Don't call chatUI.displayMessage directly - let the event listener handle it
+      // This prevents duplicate message display
+    }
+
+    /**
+     * Handle user connected event
+     * @param {string} user - User name
+     * @private
+     */
+    _handleUserConnected(user) {
+      if (!this.activeUsers.includes(user)) {
+        this.activeUsers.push(user);
+        
+        // Emit event
+        this.emit('userconnected', { user });
+        
+        // Play connection sound if notifications provided
+        if (this.notifications && typeof this.notifications.ping === 'function') {
+          this.notifications.ping().catch(err => {
+            console.debug('Could not play connection ping:', err);
+          });
+        }
+        
+        // Use chatUI if provided
+        if (this.chatUI && typeof this.chatUI.updateActiveUsers === 'function') {
+          this.chatUI.updateActiveUsers([...this.activeUsers]);
+        }
+      }
+    }
+
+    /**
+     * Handle user disconnected event
+     * @param {string} user - User name
+     * @private
+     */
+    _handleUserDisconnected(user) {
+      const index = this.activeUsers.indexOf(user);
+      if (index !== -1) {
+        // Get user's color before removing
+        const oldColor = this.userColors[index % this.userColors.length];
+        
+        // Remove user
+        this.activeUsers.splice(index, 1);
+        
+        // Recycle color
+        this.userColors = this.userColors.filter((color) => color !== oldColor).concat([oldColor]);
+        
+        // Emit event
+        this.emit('userdisconnected', { user });
+        
+        // Use chatUI if provided
+        if (this.chatUI && typeof this.chatUI.updateActiveUsers === 'function') {
+          this.chatUI.updateActiveUsers([...this.activeUsers]);
+        }
+      }
+    }
+
+    /**
+     * Send a chat message
+     * @param {string} message - Message to send (optional if chatUI provides input)
+     */
+    sendMessage(message) {
+      // Get message from chatUI if not provided
+      if (!message && this.chatUI && typeof this.chatUI.getMessageInput === 'function') {
+        message = this.chatUI.getMessageInput();
+      }
+      
+      if (!message) {
+        throw new Error('Message is required');
+      }
+      
+      if (!this.rtcClient) {
+        throw new Error('RTC client not available');
+      }
+      
+      if (this.rtcClient.sendRTCChat) {
+        this.rtcClient.sendRTCChat(message);
+        
+        // Clear input if chatUI provides it
+        if (this.chatUI && typeof this.chatUI.clearMessageInput === 'function') {
+          this.chatUI.clearMessageInput();
+        }
+      } else {
+        throw new Error('RTC client does not support sendRTCChat');
+      }
+    }
+
+    /**
+     * Get user color for a user
+     * @param {string} user - User name
+     * @returns {string} Color string
+     */
+    getUserColor(user) {
+      if (user === this.name + "( You )") {
+        return this.options.primaryUserColor;
+      }
+      const index = this.activeUsers.indexOf(user);
+      if (index !== -1) {
+        return this.userColors[index % this.userColors.length];
+      }
+      return this.options.primaryUserColor;
+    }
+
+    /**
+     * Get message history
+     * @returns {Array} Array of message objects
+     */
+    getHistory() {
+      return [...this.history];
+    }
+
+    /**
+     * Set message history
+     * @param {Array} history - Array of message objects
+     */
+    setHistory(history) {
+      this.history = [...history];
+      this.emit('historyupdated', { history: this.history });
+    }
+
+    /**
+     * Get active users
+     * @returns {Array} Array of user names
+     */
+    getActiveUsers() {
+      return [...this.activeUsers];
+    }
+
+    /**
+     * Set user name
+     * @param {string} name - User name
+     */
+    setName(name) {
+      this.name = name;
+      this.emit('namechanged', { name });
+    }
+
+    /**
+     * Get user name
+     * @returns {string} User name
+     */
+    getName() {
+      return this.name;
+    }
+
+    /**
+     * Cleanup and destroy the manager
+     */
+    destroy() {
+      // Clear state
+      this.history = [];
+      this.activeUsers = [];
+      this.userColors = [...this.options.userColors];
+      
+      // Remove event listeners
+      if (this.rtcClient && this.rtcClient.off) {
+        this.rtcClient.off('chat', this._handleChatMessage);
+        this.rtcClient.off('connectedtopeer', this._handleUserConnected);
+        this.rtcClient.off('disconnectedfrompeer', this._handleUserDisconnected);
+      }
+      
+      // Remove all event listeners
+      this.removeAllListeners();
+    }
+  }
+
+  /**
+   * RTCVideoChat - Core logic for managing video streams and calls
+   * 
+   * This class manages MediaStream objects and call lifecycle without any UI dependencies.
+   * It provides callbacks for UI updates, making it easy to integrate with any UI framework.
+   * 
+   * Note: This is a legacy component. New code should use CallManager instead.
+   * 
+   * Usage:
+   *   import { RTCVideoChat } from './rtc-video-chat.js';
+   *   
+   *   const videoChat = new RTCVideoChat(rtcClient, {
+   *     setLocalSrc: (stream) => { // update local video element
+   *     },
+   *     setRemoteSrc: (stream, peerName) => { // update remote video element
+   *     },
+   *     hide: () => { // hide video UI
+   *     },
+   *     show: () => { // show video UI
+   *     }
+   *   });
+   * 
+   * @module rtc-video-chat
+   */
+
+  class RTCVideoChat {
+    /**
+     * Create a new RTCVideoChat instance
+     * @param {Object} rtc - RTC client instance
+     * @param {Function} setLocalSrc - Callback to set local video source
+     * @param {Function} setRemoteSrc - Callback to set remote video source
+     * @param {Function} hide - Callback to hide video UI
+     * @param {Function} show - Callback to show video UI
+     */
+    constructor(rtc, setLocalSrc, setRemoteSrc, hide, show) {
+      this.setLocalSrc = setLocalSrc;
+      this.setRemoteSrc = setRemoteSrc;
+
+      this.accept = this.accept.bind(this);
+      this.close = this.close.bind(this);
+      this.closeCall = this.closeCall.bind(this);
+      this.endCall = this.endCall.bind(this);
+      this.setStreamCount = this.setStreamCount.bind(this);
+
+      this._rtc = null;
+      if (rtc) {
+        this.rtc = rtc;
+      }
+      this.pendingNames = [];
+
+      this.localStream = null;
+      this.remoteStreams = {};
+
+      if (hide) {
+        this.hide = hide;
+      }
+      if (show) {
+        this.show = show;
+      }
+    }
+
+    get rtc() {
+      if (!this._rtc) {
+        throw new Error("RTC not set");
+      }
+      return this._rtc;
+    }
+
+    set rtc(rtc) {
+      this._rtc = rtc;
+      rtc.on('callconnected', this.accept);
+      rtc.on('calldisconnected', this.endCall);
+    }
+
+    get name() {
+      return this.rtc.name;
+    }
+
+    call(peerName, promise = 'end') {
+      this.pendingNames.push(peerName);
+      let { start, end } = this.rtc.callUser(peerName);
+      end = end.then(() => {
+        this.close(peerName);
+      });
+      if (promise === 'end') {
+        return end;
+      }
+      return start;
+    }
+
+    endCall(peerName = 'all') {
+      if (peerName === 'all') {
+        for (let name of Object.keys(this.remoteStreams)) {
+          this.endCall(name);
+        }
+      }
+      if (this.remoteStreams[peerName]) {
+        this.rtc.endCallWithUser(peerName);
+      }
+      this.closeCall(peerName);
+    }
+
+    accept(name, streams) {
+      if (streams instanceof Promise) {
+        streams.then(streams => this.accept(name, streams));
+        return;
+      }
+      if (this.pendingNames.includes(name)) {
+        this.pendingNames = this.pendingNames.filter(n => n !== name);
+      }
+
+      if (!this.localStream) {
+        this.localStream = streams.localStream;
+        this.setLocalSrc(this.localStream);
+      }
+      this.setRemoteSrc(streams.remoteStream, name);
+      this.remoteStreams[name] = streams.remoteStream;
+      this.setStreamCount(Object.keys(this.remoteStreams).length);
+    }
+
+    closeCall(peerName) {
+      this.pendingNames = this.pendingNames.filter(name => name !== peerName);
+      this.setRemoteSrc(null, peerName);
+      let rs = this.remoteStreams[peerName];
+      if (rs) {
+        try {
+          rs.getTracks().forEach(track => track.stop());
+        } catch (e) {
+          // Ignore errors when stopping tracks
+        }
+        delete this.remoteStreams[peerName];
+        this.setStreamCount(Object.keys(this.remoteStreams).length);
+      }
+    }
+
+    setStreamCount(count) {
+      if (!count) {
+        if (this.localStream) {
+          try {
+            this.localStream.getTracks().forEach(track => track.stop());
+          } catch (e) {
+            // Ignore errors when stopping tracks
+          }
+          this.setLocalSrc(null);
+          this.localStream = null;
+        }
+        this.setLocalSrc(null);
+        this.localStream = null;
+        this.hide();
+      } else {
+        this.show();
+      }
+    }
+
+    hide() {
+      // Override in subclass or via constructor
+    }
+
+    show() {
+      // Override in subclass or via constructor
+    }
+
+    close() {
+      // End all streams
+      this.endCall();
+    }
+  }
+
+  /**
+   * ChatUIInterface - Interface for chat UI components
+   * 
+   * This interface defines the minimum methods a chat UI component must implement
+   * to work with ChatManager. All methods are optional - implement only what you need.
+   * 
+   * Configuration options (via UIConfigInterface):
+   * - allowRoomChange: boolean - Whether room changes are allowed (default: true)
+   * - showRoom: boolean - Whether to show room name (default: true)
+   * - baseTopic: string - Base MQTT topic prefix (default: '')
+   * - currentRoom: string - Current room name (default: '')
+   * - callModes: 'audio' | 'video' | 'both' - Which call types to expose (default: 'both')
+   * - callTimeout: number - Call timeout in milliseconds (default: 15000)
+   * - videoDisplayComponent: class - Optional custom video display component
+   * - primaryUserColor: string - Color for primary user (default: 'lightblue')
+   * - userColors: Array<string> - Colors for other users
+   * - ringerVolume: number - Ringtone volume 0-1 (default: 0.3)
+   * - notificationVolume: number - Notification volume 0-1 (default: 0.2)
+   * 
+   * @interface ChatUIInterface
+   */
+  class ChatUIInterface {
+    /**
+     * Get configuration for this UI component
+     * @returns {Object} Configuration object
+     */
+    getConfig() {
+      throw new Error('getConfig must be implemented or use UIConfigInterface.getDefaultConfig()');
+    }
+    /**
+     * Display a chat message
+     * @param {Object} messageData - {data: string, sender: string, timestamp: number}
+     */
+    displayMessage(messageData) {
+      throw new Error('displayMessage must be implemented');
+    }
+
+    /**
+     * Update the active users display
+     * @param {Array<string>} users - List of active user names
+     */
+    updateActiveUsers(users) {
+      throw new Error('updateActiveUsers must be implemented');
+    }
+
+    /**
+     * Get the current message input value
+     * @returns {string} Current input value
+     */
+    getMessageInput() {
+      throw new Error('getMessageInput must be implemented');
+    }
+
+    /**
+     * Clear the message input
+     */
+    clearMessageInput() {
+      throw new Error('clearMessageInput must be implemented');
+    }
+
+    /**
+     * Enable or disable the message input
+     * @param {boolean} enabled - Whether input should be enabled
+     */
+    setInputEnabled(enabled) {
+      throw new Error('setInputEnabled must be implemented');
+    }
+  }
+
+  /**
+   * CallUIInterface - Interface for call UI components
+   * 
+   * This interface defines the minimum methods a call UI component must implement
+   * to work with CallManager. All methods are optional - implement only what you need.
+   * 
+   * @interface CallUIInterface
+   */
+  class CallUIInterface {
+    /**
+     * Display an incoming call prompt
+     * @param {string} peerName - Name of the caller
+     * @param {Object} callInfo - {video: boolean, audio: boolean}
+     * @returns {Promise<boolean>} Promise that resolves to true to accept, false to reject
+     */
+    showIncomingCallPrompt(peerName, callInfo) {
+      throw new Error('showIncomingCallPrompt must be implemented');
+    }
+
+    /**
+     * Hide/remove the incoming call prompt
+     * @param {string} peerName - Name of the caller
+     */
+    hideIncomingCallPrompt(peerName) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Display a missed call notification
+     * @param {string} peerName - Name of the peer
+     * @param {string} direction - 'incoming' or 'outgoing'
+     */
+    showMissedCallNotification(peerName, direction) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Display a call declined notification
+     * @param {string} peerName - Name of the peer who declined
+     */
+    showCallDeclinedNotification(peerName) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Update call button states
+     * @param {Object} state - {inCall: boolean, callType: string|null, isOutgoing: boolean}
+     */
+    updateCallButtonStates(state) {
+      // Optional - no-op by default
+    }
+  }
+
+  /**
+   * StreamDisplayInterface - Interface for audio/video stream display components
+   * 
+   * This interface defines the minimum methods a stream display component must implement
+   * to work with CallManager for displaying media streams.
+   * 
+   * @interface StreamDisplayInterface
+   */
+  class StreamDisplayInterface {
+    /**
+     * Set streams for a user
+     * @param {string} user - User name
+     * @param {Object} streams - {localStream: MediaStream, remoteStream: MediaStream}
+     */
+    setStreams(user, streams) {
+      throw new Error('setStreams must be implemented');
+    }
+
+    /**
+     * Remove streams for a user
+     * @param {string} user - User name
+     */
+    removeStreams(user) {
+      throw new Error('removeStreams must be implemented');
+    }
+
+    /**
+     * Show the stream display
+     */
+    show() {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Hide the stream display
+     */
+    hide() {
+      // Optional - no-op by default
+    }
+  }
+
+  /**
+   * AudioControllerInterface - Interface for audio control components
+   * 
+   * This interface defines methods for controlling audio streams (mute mic, mute speakers).
+   * Implement this if you want to provide audio controls.
+   * 
+   * @interface AudioControllerInterface
+   */
+  class AudioControllerInterface {
+    /**
+     * Mute or unmute the microphone
+     * @param {boolean} muted - Whether to mute (true) or unmute (false)
+     * @param {Map<string, MediaStream>} localStreams - Map of user -> local MediaStream
+     */
+    setMicMuted(muted, localStreams) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Mute or unmute the speakers
+     * @param {boolean} muted - Whether to mute (true) or unmute (false)
+     * @param {Map<string, HTMLMediaElement>} remoteAudioElements - Map of user -> audio element
+     */
+    setSpeakersMuted(muted, remoteAudioElements) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Get current mic mute state
+     * @returns {boolean} Whether mic is muted
+     */
+    isMicMuted() {
+      return false;
+    }
+
+    /**
+     * Get current speakers mute state
+     * @returns {boolean} Whether speakers are muted
+     */
+    isSpeakersMuted() {
+      return false;
+    }
+  }
+
+  /**
+   * VideoControllerInterface - Interface for video control components
+   * 
+   * This interface defines methods for controlling video streams (hide/show video).
+   * Implement this if you want to provide video controls.
+   * 
+   * @interface VideoControllerInterface
+   */
+  class VideoControllerInterface {
+    /**
+     * Hide or show video
+     * @param {boolean} hidden - Whether to hide (true) or show (false) video
+     * @param {Map<string, MediaStream>} localStreams - Map of user -> local MediaStream
+     */
+    setVideoHidden(hidden, localStreams) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Get current video hidden state
+     * @returns {boolean} Whether video is hidden
+     */
+    isVideoHidden() {
+      return false;
+    }
+  }
+
+  /**
+   * VideoInterface - Interface for video element components
+   * 
+   * This interface defines methods for video elements that display MediaStreams.
+   * This allows for custom video implementations (e.g., custom HTML elements,
+   * React components, Canvas-based rendering, etc.)
+   * 
+   * @interface VideoInterface
+   */
+  class VideoInterface {
+    /**
+     * Set the video source (MediaStream)
+     * @param {MediaStream|null} stream - MediaStream to display, or null to clear
+     */
+    setStream(stream) {
+      throw new Error('setStream must be implemented');
+    }
+
+    /**
+     * Get the current video source
+     * @returns {MediaStream|null} Current stream or null
+     */
+    getStream() {
+      throw new Error('getStream must be implemented');
+    }
+
+    /**
+     * Show the video element
+     */
+    show() {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Hide the video element
+     */
+    hide() {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Set muted state
+     * @param {boolean} muted - Whether video should be muted
+     */
+    setMuted(muted) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Get muted state
+     * @returns {boolean} Whether video is muted
+     */
+    isMuted() {
+      return false;
+    }
+
+    /**
+     * Set autoplay
+     * @param {boolean} autoplay - Whether video should autoplay
+     */
+    setAutoplay(autoplay) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Set playsinline (for mobile)
+     * @param {boolean} playsinline - Whether video should play inline
+     */
+    setPlaysinline(playsinline) {
+      // Optional - no-op by default
+    }
+
+    /**
+     * Get the underlying element (for DOM manipulation if needed)
+     * @returns {HTMLElement|null} The underlying element
+     */
+    getElement() {
+      return null;
+    }
+
+    /**
+     * Cleanup and destroy the video element
+     */
+    destroy() {
+      // Optional - no-op by default
+    }
+  }
+
+  /**
+   * RingerInterface - Interface for ringtone/audio notification components
+   * 
+   * This interface defines methods for playing ringtones (e.g., for incoming calls).
+   * Implement this if you want to provide custom ringtone behavior.
+   * 
+   * @interface RingerInterface
+   */
+  class RingerInterface {
+    /**
+     * Start playing the ringtone
+     * @returns {Promise} Promise that resolves when ringtone starts
+     */
+    start() {
+      throw new Error('start must be implemented');
+    }
+
+    /**
+     * Stop playing the ringtone
+     */
+    stop() {
+      throw new Error('stop must be implemented');
+    }
+
+    /**
+     * Check if ringtone is currently playing
+     * @returns {boolean} Whether ringtone is playing
+     */
+    isRinging() {
+      return false;
+    }
+  }
+
+  /**
+   * NotificationInterface - Interface for notification components
+   * 
+   * This interface defines methods for showing notifications (e.g., connection sounds, alerts).
+   * Implement this if you want to provide custom notification behavior.
+   * 
+   * @interface NotificationInterface
+   */
+  class NotificationInterface {
+    /**
+     * Play a ping/connection sound
+     * @returns {Promise} Promise that resolves when sound plays
+     */
+    ping() {
+      // Optional - no-op by default
+      return Promise.resolve();
+    }
+
+    /**
+     * Play a beep sound
+     * @returns {Promise} Promise that resolves when sound plays
+     */
+    beep() {
+      // Optional - no-op by default
+      return Promise.resolve();
+    }
+
+    /**
+     * Show a visual notification (e.g., browser notification)
+     * @param {string} title - Notification title
+     * @param {Object} options - Notification options {body, icon, etc.}
+     * @returns {Promise} Promise that resolves when notification is shown
+     */
+    showNotification(title, options = {}) {
+      // Optional - no-op by default
+      return Promise.resolve();
+    }
+  }
+
+  /**
+   * StorageInterface - Interface for storage adapters
+   * 
+   * This interface defines methods for persistent storage (e.g., localStorage, IndexedDB).
+   * Note: This is already implemented as StorageAdapter, but included here for completeness.
+   * 
+   * @interface StorageInterface
+   */
+  class StorageInterface {
+    /**
+     * Get an item from storage
+     * @param {string} key - Storage key
+     * @returns {string|null} Stored value or null
+     */
+    getItem(key) {
+      throw new Error('getItem must be implemented');
+    }
+
+    /**
+     * Set an item in storage
+     * @param {string} key - Storage key
+     * @param {string} value - Value to store
+     */
+    setItem(key, value) {
+      throw new Error('setItem must be implemented');
+    }
+
+    /**
+     * Remove an item from storage
+     * @param {string} key - Storage key
+     */
+    removeItem(key) {
+      throw new Error('removeItem must be implemented');
+    }
+  }
+
+  /**
+   * UIConfigInterface - Configuration options for UI components
+   * 
+   * This interface defines standard configuration options that all UI implementations
+   * should support. This ensures consistency across different UI implementations.
+   * 
+   * @interface UIConfigInterface
+   */
+  class UIConfigInterface {
+    /**
+     * Get the default configuration
+     * @returns {Object} Default configuration object
+     */
+    static getDefaultConfig() {
+      return {
+        // Room/Name configuration
+        allowRoomChange: true,
+        showRoom: true,
+        baseTopic: '',
+        currentRoom: '',
+        
+        // Call configuration
+        callModes: 'both', // 'audio' | 'video' | 'both'
+        callTimeout: 15000, // milliseconds
+        
+        // Component configuration
+        videoDisplayComponent: null, // Optional custom video display component class
+        
+        // User configuration
+        primaryUserColor: 'lightblue',
+        userColors: [
+          'lightcoral',
+          'lightseagreen',
+          'lightsalmon',
+          'lightgreen',
+        ],
+        
+        // Audio configuration
+        ringerVolume: 0.3,
+        notificationVolume: 0.2,
+      };
+    }
+
+    /**
+     * Validate configuration
+     * @param {Object} config - Configuration to validate
+     * @returns {Object} Validated configuration with defaults applied
+     */
+    static validateConfig(config = {}) {
+      const defaults = this.getDefaultConfig();
+      const validated = { ...defaults };
+      
+      // Validate and apply provided config
+      if (typeof config.allowRoomChange === 'boolean') {
+        validated.allowRoomChange = config.allowRoomChange;
+      }
+      
+      if (typeof config.showRoom === 'boolean') {
+        validated.showRoom = config.showRoom;
+      }
+      
+      if (typeof config.baseTopic === 'string') {
+        validated.baseTopic = config.baseTopic;
+      }
+      
+      if (typeof config.currentRoom === 'string') {
+        validated.currentRoom = config.currentRoom;
+      }
+      
+      if (['audio', 'video', 'both'].includes(config.callModes)) {
+        validated.callModes = config.callModes;
+      }
+      
+      if (typeof config.callTimeout === 'number' && config.callTimeout > 0) {
+        validated.callTimeout = config.callTimeout;
+      }
+      
+      if (config.videoDisplayComponent !== undefined) {
+        validated.videoDisplayComponent = config.videoDisplayComponent;
+      }
+      
+      if (typeof config.primaryUserColor === 'string') {
+        validated.primaryUserColor = config.primaryUserColor;
+      }
+      
+      if (Array.isArray(config.userColors)) {
+        validated.userColors = config.userColors;
+      }
+      
+      if (typeof config.ringerVolume === 'number' && config.ringerVolume >= 0 && config.ringerVolume <= 1) {
+        validated.ringerVolume = config.ringerVolume;
+      }
+      
+      if (typeof config.notificationVolume === 'number' && config.notificationVolume >= 0 && config.notificationVolume <= 1) {
+        validated.notificationVolume = config.notificationVolume;
+      }
+      
+      return validated;
+    }
+  }
+
+  /**
+   * PluginAdapter - Base class for creating plugin adapters
+   * 
+   * This class provides a convenient way to create adapters that implement
+   * multiple interfaces. It provides default no-op implementations for all
+   * interface methods, so you only need to override what you need.
+   * 
+   * Usage:
+   *   import { PluginAdapter, UIConfigInterface } from './core/index.js';
+   *   
+   *   class MyChatAdapter extends PluginAdapter {
+   *     constructor(config = {}) {
+   *       super();
+   *       this.config = UIConfigInterface.validateConfig(config);
+   *     }
+   *     
+   *     getConfig() {
+   *       return this.config;
+   *     }
+   *     
+   *     displayMessage({data, sender, timestamp}) {
+   *       // Implement only what you need
+   *     }
+   *   }
+   * 
+   * @class PluginAdapter
+   */
+
+  class PluginAdapter {
+    constructor(config = {}) {
+      // Store validated config
+      this.config = UIConfigInterface.validateConfig(config);
+    }
+    
+    /**
+     * Get configuration for this adapter
+     * @returns {Object} Configuration object
+     */
+    getConfig() {
+      return this.config;
+    }
+    // ChatUIInterface methods
+    displayMessage(messageData) {}
+    updateActiveUsers(users) {}
+    getMessageInput() { return ''; }
+    clearMessageInput() {}
+    setInputEnabled(enabled) {}
+    
+    // CallUIInterface methods
+    showIncomingCallPrompt(peerName, callInfo) { return Promise.resolve(true); }
+    hideIncomingCallPrompt(peerName) {}
+    showMissedCallNotification(peerName, direction) {}
+    showCallDeclinedNotification(peerName) {}
+    updateCallButtonStates(state) {}
+    
+    // StreamDisplayInterface methods
+    setStreams(user, streams) {}
+    removeStreams(user) {}
+    show() {}
+    hide() {}
+    
+    // AudioControllerInterface methods
+    setMicMuted(muted, localStreams) {}
+    setSpeakersMuted(muted, remoteAudioElements) {}
+    isMicMuted() { return false; }
+    isSpeakersMuted() { return false; }
+    
+    // VideoControllerInterface methods
+    setVideoHidden(hidden, localStreams) {}
+    isVideoHidden() { return false; }
+    
+    // VideoInterface methods
+    setStream(stream) {}
+    getStream() { return null; }
+    show() {}
+    hide() {}
+    setMuted(muted) {}
+    isMuted() { return false; }
+    setAutoplay(autoplay) {}
+    setPlaysinline(playsinline) {}
+    getElement() { return null; }
+    destroy() {}
+    
+    // RingerInterface methods
+    start() {}
+    stop() {}
+    isRinging() { return false; }
+    
+    // NotificationInterface methods
+    ping() { return Promise.resolve(); }
+    beep() { return Promise.resolve(); }
+    showNotification(title, options = {}) { return Promise.resolve(); }
+    
+    // StorageInterface methods
+    getItem(key) { return null; }
+    setItem(key, value) {}
+    removeItem(key) {}
+  }
+
+  /**
+   * StateManager - Simple state management for UI components
+   * 
+   * Manages mutable state separate from configuration.
+   * Configuration is immutable, state can change.
+   * 
+   * Usage:
+   *   import { StateManager } from './state-manager.js';
+   *   
+   *   const state = new StateManager({
+   *     currentRoom: '',
+   *     name: '?'
+   *   });
+   *   
+   *   state.set('currentRoom', 'newRoom');
+   *   const room = state.get('currentRoom');
+   *   state.on('change', (key, value) => { ... });
+   * 
+   * @class StateManager
+   */
+
+
+  class StateManager extends EventEmitter {
+    /**
+     * Create a new StateManager instance
+     * @param {Object} initialState - Initial state values
+     */
+    constructor(initialState = {}) {
+      super();
+      this._state = { ...initialState };
+    }
+
+    /**
+     * Get a state value
+     * @param {string} key - State key
+     * @returns {*} State value
+     */
+    get(key) {
+      return this._state[key];
+    }
+
+    /**
+     * Set a state value
+     * @param {string} key - State key
+     * @param {*} value - State value
+     */
+    set(key, value) {
+      const oldValue = this._state[key];
+      if (oldValue !== value) {
+        this._state[key] = value;
+        this.emit('change', { key, value, oldValue });
+        this.emit(`change:${key}`, { value, oldValue });
+      }
+    }
+
+    /**
+     * Get all state
+     * @returns {Object} Copy of all state
+     */
+    getAll() {
+      return { ...this._state };
+    }
+
+    /**
+     * Set multiple state values at once
+     * @param {Object} updates - Object with key-value pairs
+     */
+    setMultiple(updates) {
+      Object.keys(updates).forEach(key => {
+        this.set(key, updates[key]);
+      });
+    }
+
+    /**
+     * Reset state to initial values
+     * @param {Object} newInitialState - Optional new initial state
+     */
+    reset(newInitialState = null) {
+      if (newInitialState) {
+        this._state = { ...newInitialState };
+      } else {
+        // Reset to constructor initial state (would need to store it)
+        this._state = {};
+      }
+      this.emit('reset', { state: this.getAll() });
+    }
+  }
+
+  exports.AudioControllerInterface = AudioControllerInterface;
   exports.BaseMQTTRTCClient = BaseMQTTRTCClient;
+  exports.CallManager = CallManager;
+  exports.CallUIInterface = CallUIInterface;
+  exports.ChatManager = ChatManager;
+  exports.ChatUIInterface = ChatUIInterface;
   exports.ConfigPresets = ConfigPresets;
   exports.DeferredPromise = DeferredPromise;
   exports.EventEmitter = EventEmitter;
@@ -3437,13 +5594,23 @@ var RTChatCore = (function (exports) {
   exports.MQTTLoader = MQTTLoader;
   exports.MQTTRTCClient = MQTTRTCClient;
   exports.MemoryAdapter = MemoryAdapter;
+  exports.NotificationInterface = NotificationInterface;
   exports.Peer = Peer;
+  exports.PluginAdapter = PluginAdapter;
   exports.PromisefulMQTTRTCClient = PromisefulMQTTRTCClient;
   exports.RTCConfig = RTCConfig;
   exports.RTCConnection = RTCConnection;
+  exports.RTCVideoChat = RTCVideoChat;
+  exports.RingerInterface = RingerInterface;
   exports.SignedMQTTRTCClient = SignedMQTTRTCClient;
+  exports.StateManager = StateManager;
   exports.StorageAdapter = StorageAdapter;
+  exports.StorageInterface = StorageInterface;
+  exports.StreamDisplayInterface = StreamDisplayInterface;
   exports.TabManager = TabManager;
+  exports.UIConfigInterface = UIConfigInterface;
+  exports.VideoControllerInterface = VideoControllerInterface;
+  exports.VideoInterface = VideoInterface;
   exports.deepMerge = deepMerge;
   exports.isObject = isObject;
 

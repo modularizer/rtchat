@@ -356,7 +356,16 @@ class BaseMQTTRTCClient extends EventEmitter {
       }
     }
     
-    console.log("Sending message to " + this.topic + " subtopic " + subtopic, data);
+    // Reduce logging for frequent messages like ICE candidates
+    if (subtopic === "RTCIceCandidate") {
+      // Only log null candidates (end of ICE gathering) or log at debug level
+      if (!data || data === null) {
+        console.log("Sending message to " + this.topic + " subtopic " + subtopic + " (end of ICE gathering)");
+      }
+      // Otherwise, ICE candidates are sent too frequently to log each one
+    } else {
+      console.log("Sending message to " + this.topic + " subtopic " + subtopic, data);
+    }
     this.client.publish(this.topic, payloadString);
     payload.sent = true;
     this.mqttHistory.push(payload);
@@ -490,15 +499,13 @@ class BaseMQTTRTCClient extends EventEmitter {
     let callStartPromise;
     if (callInfo instanceof MediaStream){
         let localStream = callInfo;
-        callStartPromise = this.rtcConnections[user].startCall(localStream).then(remoteStream => {
-            return {localStream, remoteStream};
-        })
+        // startCall returns a promise that resolves to {localStream, remoteStream}
+        callStartPromise = this.rtcConnections[user].startCall(localStream);
     }else{
         callInfo = callInfo || {video: true, audio: true}
         callStartPromise = navigator.mediaDevices.getUserMedia(callInfo).then(localStream => {
-            return this.rtcConnections[user].startCall(localStream).then(remoteStream => {
-                return {localStream, remoteStream};
-            });
+            // startCall returns a promise that resolves to {localStream, remoteStream}
+            return this.rtcConnections[user].startCall(localStream);
         });
     }
     let callEndPromise = this.rtcConnections[user].callEndPromise.promise;
@@ -773,7 +780,10 @@ class RTCConnection {
 
     startCall(stream){
         this.initiatedCall = true;
-        let streamInfo = {video: true, audio: true};//TODO: read from stream
+        // Detect call type from stream tracks
+        const hasVideo = stream.getVideoTracks().length > 0;
+        const hasAudio = stream.getAudioTracks().length > 0;
+        let streamInfo = {video: hasVideo, audio: hasAudio};
         this.streamConnection = this._makeStreamConnection(stream);
 
         this.streamConnection.createOffer()
@@ -838,7 +848,12 @@ class RTCConnection {
     }
     receiveAnswer(answer){
         if (this.peerConnection.signalingState !== 'have-local-offer') {
-            console.warn("Wrong state " + this.peerConnection.signalingState);
+            // This can happen if answer arrives after connection is established or out of order
+            // It's not necessarily an error, just means we can't process this answer
+            if (this.peerConnection.signalingState !== 'stable') {
+                // Only warn if it's an unexpected state (not just "stable" which is normal)
+                console.warn("Received answer in unexpected signaling state: " + this.peerConnection.signalingState);
+            }
             return;
         }
         this.peerConnection.setRemoteDescription(new RTCSessionDescription(answer));
@@ -906,6 +921,12 @@ class RTCConnection {
                 }
                 return this.streamConnection;
             }).catch(e => {
+                // If call was rejected, properly end the call
+                if (e === "Call rejected" || (typeof e === 'string' && e.includes('rejected'))) {
+                    console.log(`Call rejected by ${this.target}, ending call`);
+                    // End the call properly
+                    this.endCall();
+                }
                 this.streamConnectionPromise.reject(e);
                 this.streamPromise.reject(e);
             }).then(streamConnection => {
@@ -983,7 +1004,8 @@ class RTCConnection {
     onstreamicecandidate(event){
         if (event.candidate) {
             // Send ICE candidate via RTC
-            console.log("Sending stream ice", this, event.candidate);
+            // Reduced logging - ICE candidates are sent very frequently during connection setup
+            // console.log("Sending stream ice", this, event.candidate);
             this.send("streamice", JSON.stringify(event.candidate));
         }
     }

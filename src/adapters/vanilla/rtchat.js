@@ -58,47 +58,62 @@ import { BasicVideoChat } from "../../ui/video-chat.js";
 
 class RTChat extends ChatBox {
     constructor(config, VC = BasicVideoChat) {
-        super();
-        config = config || {};
+        // Must call super() first before accessing 'this'
+        super(config || {});
         
-        // Check for auto-config from URL parameters (when ?add=true)
-        if (this._autoConfig) {
-            config = { ...config, ...this._autoConfig };
-            delete this._autoConfig;
-        }
+        // Store config for later use (use this.config from parent, or merge with provided config)
+        const providedConfig = config || {};
+        this._config = { ...this.config, ...providedConfig };
+        
+        // Store VC for later use
+        this._VC = VC;
+        
+        // Flag to track if we've applied auto-config
+        this._autoConfigApplied = false;
+        this._VC = VC;
 
         // Configure room display and editability
-        this.showRoom = config.showRoom !== false; // Default: true
-        this.allowRoomChange = config.allowRoomChange !== false; // Default: true
+        this.showRoom = this._config.showRoom !== false; // Default: true
+        this.allowRoomChange = this._config.allowRoomChange !== false; // Default: true
 
-        if (!config.showRoomInput){
-            this.chatRoomBox.style.display = "none";
-        }
+        // Note: chatRoomBox no longer exists - room input is now in ChatHeader component
+        // The showRoomInput config is handled by ChatHeader's showRoom config
+        
         this.prompt = this.prompt.bind(this);
         this.notify = this.notify.bind(this);
         this.connectionrequest = this.connectionrequest.bind(this);
         this._activeConnectionPrompts = new Map(); // Track active prompts by peer name
+        
         // Use defaultRoom from config if provided, otherwise localStorage, otherwise 'chat'
-        let topic = config.topic || localStorage.getItem('topic') || 'chat';
+        let topic = this._config.topic || localStorage.getItem('topic') || 'chat';
         // If topic is an object, extract the room
         if (typeof topic === 'object' && topic.room) {
             topic = topic.room;
         }
-        this.chatRoom.value = topic;
-        this.chatRoom.addEventListener('change', () => {
-            localStorage.setItem('topic', this.chatRoom.value);
-            this.connectRTC(config);
-        })
         
-        // Listen for room change events from ChatBox
+        // Set room in ChatHeader component
+        if (this.chatHeaderComponent) {
+            this.chatHeaderComponent.setRoom(topic);
+        }
+        
+        // Listen for room change events from ChatHeader component
+        if (this.chatHeaderComponent) {
+            this.chatHeaderComponent.addEventListener('roomchange', (e) => {
+                const newRoom = e.detail.room;
+                localStorage.setItem('topic', newRoom);
+                this.connectRTC(this._config);
+            });
+        }
+        
+        // Also listen for room change events from ChatBox (backward compatibility)
         this.addEventListener('roomchange', (e) => {
             const newRoom = e.detail.room;
             localStorage.setItem('topic', newRoom);
-            this.connectRTC(config);
+            this.connectRTC(this._config);
         });
         
         this.connectRTC = this.connectRTC.bind(this);
-        this.connectRTC(config);
+        this.connectRTC(this._config);
         // Don't add BasicVideoChat if ChatBox is using VideoStreamDisplay
         // ChatBox now handles video display internally, so we skip the legacy VC component
         // this.vc = new VC(this.rtc);
@@ -107,6 +122,50 @@ class RTChat extends ChatBox {
         this.lastValidated = "";
 
     }
+    
+    /**
+     * Called when the element is connected to the DOM
+     * Use this to apply auto-config that was set before element creation
+     */
+    connectedCallback() {
+        // Check for auto-config from URL parameters (when ?add=true)
+        // Check if there's a pending config in the queue
+        if (autoConfigPending.length > 0 && !this._autoConfigApplied) {
+            const autoConfig = autoConfigPending.shift(); // Get and remove first pending config
+            this._autoConfigApplied = true;
+            
+            // Merge auto-config into existing config
+            Object.assign(this.config, autoConfig);
+            // Also update _config for RTChat-specific properties
+            this._config = { ...this._config, ...autoConfig };
+            
+            // Re-apply config-dependent settings
+            this.showRoom = this._config.showRoom !== false;
+            this.allowRoomChange = this._config.allowRoomChange !== false;
+            
+            // Re-initialize with new config if needed
+            if (this._config.topic) {
+                let topic = this._config.topic;
+                if (typeof topic === 'object' && topic.room) {
+                    topic = topic.room;
+                }
+                // Set room in ChatHeader component
+                if (this.chatHeaderComponent) {
+                    this.chatHeaderComponent.setRoom(topic);
+                }
+                // Reconnect with new config
+                if (this.connectRTC) {
+                    this.connectRTC(this._config);
+                }
+            }
+        }
+        
+        // Call parent's connectedCallback if it exists
+        if (super.connectedCallback) {
+            super.connectedCallback();
+        }
+    }
+    
     connectRTC(config) {
         config = config || {};
         // Use topic from config if provided, otherwise localStorage, otherwise 'chat'
@@ -125,252 +184,13 @@ class RTChat extends ChatBox {
         this.rtc = new SignedMQTTRTCClient(config);
         this.rtc.shouldTrust = (peerName) => {return Promise.resolve(true)};
         this.rtc.on('connectionrequest', this.connectionrequest);
-        this.incomingCalls = {};
-        this.rtc.on('call', (peerName, info, promises) => {
-            // Start ringing (try to resume audio context first for autoplay policy)
-            if (this.ringer) {
-                this.ringer.start().catch(err => {
-                    console.warn('Could not start ringtone (may require user interaction):', err);
-                });
-            }
-            
-            // Check if it's a video call
-            const isVideoCall = info?.video === true;
-            
-            let promptResult;
-            if (isVideoCall) {
-                // For video calls, offer options: accept with video or audio-only
-                promptResult = this.promptWithOptions(
-                    `Incoming video call from ${peerName}`,
-                    [
-                        { text: 'Accept with Video', value: 'video' },
-                        { text: 'Accept Audio Only', value: 'audio' },
-                        { text: 'Decline', value: false }
-                    ]
-                );
-            } else {
-                // Audio-only call - use regular prompt
-                promptResult = this.prompt(`Accept call from ${peerName}`);
-            }
-            
-            // Set up timeout for unanswered incoming call
-            const callTimeout = this.callTimeout || 15000; // Use ChatBox's callTimeout or default
-            let timeoutId = setTimeout(() => {
-                console.log(`Incoming call from ${peerName} timed out after ${callTimeout}ms`);
-                // Stop ringing
-                if (this.ringer) {
-                    this.ringer.stop();
-                }
-                // Show missed call message
-                this._showMissedCallMessage(peerName, 'incoming');
-                // Remove pending call and prompt
-                if (this.pendingCalls && this.pendingCalls.has(peerName)) {
-                    const pendingCall = this.pendingCalls.get(peerName);
-                    if (pendingCall && pendingCall.promptElement) {
-                        try {
-                            pendingCall.promptElement.remove();
-                        } catch (err) {
-                            console.warn('Could not remove prompt element:', err);
-                        }
-                    }
-                    this.pendingCalls.delete(peerName);
-                }
-                // Properly end the call to stop streams on both sides
-                if (this.rtc) {
-                    try {
-                        this.rtc.endCallWithUser(peerName);
-                    } catch (err) {
-                        console.warn('Error ending timed out call:', err);
-                    }
-                }
-                // Clean up any streams that might have started
-                if (this.videoDisplay) {
-                    this.videoDisplay.removeStreams(peerName);
-                }
-                if (this.audioDisplay) {
-                    this.audioDisplay.removeStreams(peerName);
-                }
-                if (this.activeVideoCalls) {
-                    this.activeVideoCalls.delete(peerName);
-                }
-                if (this.activeAudioCalls) {
-                    this.activeAudioCalls.delete(peerName);
-                }
-            }, callTimeout);
-            
-            // Track pending call with prompt element and timeout for cleanup
-            if (this.pendingCalls) {
-                this.pendingCalls.set(peerName, { 
-                    callInfo: info, 
-                    promises,
-                    promptElement: promptResult.element,
-                    timeoutId: timeoutId
-                });
-            }
-            
-            // Listen for call end to clean up prompt
-            const cleanupOnEnd = () => {
-                // Clear timeout
-                if (timeoutId) {
-                    clearTimeout(timeoutId);
-                    timeoutId = null;
-                }
-                if (this.ringer) {
-                    this.ringer.stop();
-                }
-                if (this.pendingCalls && this.pendingCalls.has(peerName)) {
-                    const pendingCall = this.pendingCalls.get(peerName);
-                    if (pendingCall) {
-                        // Clear timeout ID
-                        if (pendingCall.timeoutId) {
-                            clearTimeout(pendingCall.timeoutId);
-                            pendingCall.timeoutId = null;
-                        }
-                        // Remove prompt if it exists
-                        if (pendingCall.promptElement) {
-                            try {
-                                pendingCall.promptElement.remove();
-                            } catch (err) {
-                                console.warn('Could not remove prompt element:', err);
-                            }
-                        }
-                    }
-                    this.pendingCalls.delete(peerName);
-                }
-            };
-            
-            // Set up one-time listener for call end
-            const endListener = () => {
-                cleanupOnEnd();
-                this.rtc.off('callended', endListener);
-            };
-            this.rtc.on('callended', endListener);
-            
-            if (isVideoCall) {
-                return promptResult.promise.then(answer => {
-                    // Clear timeout since user responded
-                    if (timeoutId) {
-                        clearTimeout(timeoutId);
-                        timeoutId = null;
-                    }
-                    // Stop ringing when user responds
-                    if (this.ringer) {
-                        this.ringer.stop();
-                    }
-                    
-                    // Remove listener since user responded
-                    this.rtc.off('callended', endListener);
-                    
-                    // Update pending call to clear timeout
-                    if (this.pendingCalls && this.pendingCalls.has(peerName)) {
-                        const pendingCall = this.pendingCalls.get(peerName);
-                        if (pendingCall) {
-                            pendingCall.timeoutId = null;
-                        }
-                    }
-                    
-                    if (answer === false) {
-                        // Clean up pending call
-                        cleanupOnEnd();
-                        return false; // Reject call
-                    }
-                    // Update button visibility if buttons exist (legacy support)
-                    if (this.callButton) {
-                        this.callButton.style.display = "none";
-                    }
-                    if (this.endCallButton) {
-                        this.endCallButton.style.display = "block";
-                    }
-                    // Return modified callInfo based on user choice
-                    if (answer === 'audio') {
-                        // Accept with audio only - caller will see us, but we won't send video
-                        return { video: false, audio: true };
-                    }
-                    return true; // Accept with video
-                }).catch(err => {
-                    // Stop ringing if promise is rejected
-                    this.rtc.off('callended', endListener);
-                    cleanupOnEnd();
-                    return false; // Reject on error
-                });
-            } else {
-                return promptResult.promise.then(answer => {
-                    // Clear timeout since user responded
-                    if (timeoutId) {
-                        clearTimeout(timeoutId);
-                        timeoutId = null;
-                    }
-                    // Stop ringing when user responds
-                    if (this.ringer) {
-                        this.ringer.stop();
-                    }
-                    
-                    // Remove listener since user responded
-                    this.rtc.off('callended', endListener);
-                    
-                    // Update pending call to clear timeout
-                    if (this.pendingCalls && this.pendingCalls.has(peerName)) {
-                        const pendingCall = this.pendingCalls.get(peerName);
-                        if (pendingCall) {
-                            pendingCall.timeoutId = null;
-                        }
-                    }
-                    
-                    // Update button visibility if buttons exist (legacy support)
-                    if (this.callButton) {
-                        this.callButton.style.display = "none";
-                    }
-                    if (this.endCallButton) {
-                        this.endCallButton.style.display = "block";
-                    }
-                    if (!answer) {
-                        cleanupOnEnd();
-                    }
-                    return answer
-                }).catch(err => {
-                    // Stop ringing if promise is rejected
-                    this.rtc.off('callended', endListener);
-                    cleanupOnEnd();
-                    return false; // Reject on error
-                });
-            }
-        });
+        // Note: Incoming calls are now handled by CallManager, not here
+        // The 'call' event is handled by CallManager._handleIncomingCall which uses
+        // CallUIInterface.showIncomingCallPrompt (implemented by CallManagement)
+        // DO NOT add a direct 'call' event handler here - it will add prompts to messages!
         
-        // Also handle callended event globally to clean up any pending calls
-        // Note: callended may be called with or without peerName, so we check all pending calls
-        this.rtc.on('callended', (peerName) => {
-            // Stop ringing if call ends
-            if (this.ringer) {
-                this.ringer.stop();
-            }
-            
-            // If peerName is provided, clean up that specific call
-            if (peerName && this.pendingCalls && this.pendingCalls.has(peerName)) {
-                const pendingCall = this.pendingCalls.get(peerName);
-                if (pendingCall && pendingCall.promptElement) {
-                    try {
-                        pendingCall.promptElement.remove();
-                    } catch (err) {
-                        console.warn('Could not remove prompt element:', err);
-                    }
-                }
-                this.pendingCalls.delete(peerName);
-            } else if (!peerName) {
-                // If no peerName, clean up all pending calls (call ended for any reason)
-                if (this.pendingCalls) {
-                    for (const [name, pendingCall] of this.pendingCalls.entries()) {
-                        if (pendingCall && pendingCall.promptElement) {
-                            try {
-                                pendingCall.promptElement.remove();
-                            } catch (err) {
-                                console.warn('Could not remove prompt element:', err);
-                            }
-                        }
-                    }
-                    this.pendingCalls.clear();
-                }
-            }
-        });
+        // Note: callended events are now handled by CallManager
+        // DO NOT add cleanup here for pending calls - CallManager handles this
 
         this.rtc.on('validation', (peerName, trusted) => {
             if (trusted) {
@@ -415,11 +235,17 @@ class RTChat extends ChatBox {
         });
     }
     notify(message) {
-        let el = document.createElement('div');
-        el.innerHTML = message;
-        el.style.color = 'gray';
-        el.style.fontSize = '0.8em';
-        this.messagesEl.appendChild(el);
+        // Use ChatBox's cached messages element (cached as 'messages' -> this.messages)
+        const messagesEl = this.messages || this.shadowRoot?.getElementById('messages');
+        if (messagesEl) {
+            let el = document.createElement('div');
+            el.innerHTML = message;
+            el.style.color = 'gray';
+            el.style.fontSize = '0.8em';
+            messagesEl.appendChild(el);
+        } else {
+            console.warn('Cannot display notification: messages element not found', message);
+        }
     }
 
     /**
@@ -446,10 +272,11 @@ class RTChat extends ChatBox {
         messageEl.textContent = message;
         
         // Add to messages
-        if (this.messagesEl) {
-            this.messagesEl.appendChild(messageEl);
+        const messagesEl = this.messages || this.shadowRoot?.getElementById('messages');
+        if (messagesEl) {
+            messagesEl.appendChild(messageEl);
             // Auto-scroll to bottom
-            this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
+            messagesEl.scrollTop = messagesEl.scrollHeight;
         }
     }
 
@@ -566,7 +393,10 @@ class RTChat extends ChatBox {
         }
         
         el.appendChild(buttonContainer);
-        this.messagesEl.appendChild(el);
+        const messagesEl = this.messages || this.shadowRoot?.getElementById('messages');
+        if (messagesEl) {
+            messagesEl.appendChild(el);
+        }
         
         // Return both the promise and the element for tracking
         return {
@@ -610,7 +440,10 @@ class RTChat extends ChatBox {
         });
         
         el.appendChild(buttonContainer);
-        this.messagesEl.appendChild(el);
+        const messagesEl = this.messages || this.shadowRoot?.getElementById('messages');
+        if (messagesEl) {
+            messagesEl.appendChild(el);
+        }
         
         // Return both the promise and the element for tracking
         return {
@@ -622,6 +455,10 @@ class RTChat extends ChatBox {
 
 window.RTChat = RTChat;
 window.SignedMQTTRTCClient = SignedMQTTRTCClient;
+
+// Global config queue for auto-config (before element creation)
+// Store pending configs in an array - we'll match them to elements in connectedCallback
+const autoConfigPending = [];
 
 customElements.define('rtc-hat', RTChat);
 
@@ -668,12 +505,16 @@ if (['t','true','yes','y','1'].includes((new URL(getScriptUrl()).searchParams.ge
             config.topic = defaultRoomParam;
         }
         
-        const chatElement = document.createElement('rtc-hat');
-        // Apply config if any parameters were provided
+        // Store config in pending queue BEFORE creating element
         if (Object.keys(config).length > 0) {
-            // Store config in element for RTChat constructor to read
-            chatElement._autoConfig = config;
+            autoConfigPending.push(config);
         }
+        
+        // Create element - constructor will run immediately
+        // Don't set any properties on the element during or immediately after creation
+        const chatElement = document.createElement('rtc-hat');
+        
+        // Append to DOM - this will trigger connectedCallback which will apply the config
         document.body.appendChild(chatElement);
     });
 }

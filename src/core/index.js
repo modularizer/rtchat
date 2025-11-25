@@ -40,3 +40,22 @@ export { Keys } from '../crypto/keys.js';
 export { TabManager } from './tab-manager.js';
 export { MQTTLoader } from './mqtt-loader.js';
 
+// Business logic managers (platform-agnostic)
+export { CallManager } from './call-manager.js';
+export { ChatManager } from './chat-manager.js';
+
+// Legacy video chat core logic (use CallManager for new code)
+export { RTCVideoChat } from './rtc-video-chat.js';
+
+// Interfaces for UI components
+export * from './interfaces/index.js';
+
+// Plugin adapter base class
+export { PluginAdapter } from './plugin-adapter.js';
+
+// State management
+export { StateManager } from './state-manager.js';
+
+// UI Adapter documentation (see PLUGIN_ARCHITECTURE.md for usage)
+export {} from './ui-adapter.js';
+

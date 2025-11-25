@@ -1,13 +1,12 @@
 /**
- * Video Chat Components - WebRTC video calling interface
+ * BasicVideoChat - Web Component UI for displaying video
  * 
- * Provides video calling functionality with local and remote video streams.
- * Consists of two classes:
- * - RTCVideoChat: Core logic for managing video streams and calls
- * - BasicVideoChat: Web Component UI for displaying video
+ * This is a UI component that uses RTCVideoChat (from core) for business logic.
+ * It provides a Web Component interface for video calling.
  * 
  * Usage:
  *   import { BasicVideoChat } from './video-chat.js';
+ *   import { RTCVideoChat } from '../core/rtc-video-chat.js';
  *   
  *   const videoChat = new BasicVideoChat(rtcClient, {
  *     window: window,        // Optional: inject window object
@@ -31,146 +30,10 @@
  * - Call state management
  * - Responsive layout
  * 
- * RTCVideoChat (Core Logic):
- * - Manages MediaStream objects (local and remote)
- * - Handles call lifecycle (start, accept, end)
- * - Integrates with RTC client for signaling
- * - Provides callbacks for UI updates (setLocalSrc, setRemoteSrc, hide, show)
- * 
- * BasicVideoChat (Web Component):
- * - Custom element: <video-chat></video-chat>
- * - Displays video elements with proper styling
- * - Handles window resizing (via injected window object)
- * - Auto-hides when no active calls
- * 
- * Integration:
- * The video chat automatically receives 'callconnected' events from the RTC client
- * and displays the video streams. It also handles 'calldisconnected' events.
- * 
  * @module video-chat
  */
 
-class RTCVideoChat  {
-    constructor(rtc, setLocalSrc, setRemoteSrc, hide, show) {
-        this.setLocalSrc = setLocalSrc;
-        this.setRemoteSrc = setRemoteSrc;
-
-
-        this.accept = this.accept.bind(this);
-        this.close = this.close.bind(this);
-        this.closeCall = this.closeCall.bind(this);
-        this.endCall = this.endCall.bind(this);
-        this.setStreamCount = this.setStreamCount.bind(this);
-
-        this._rtc = null;
-        if (rtc) {
-            this.rtc = rtc;
-        }
-        this.pendingNames = [];
-
-        this.localStream = null;
-        this.remoteStreams = {};
-
-        if (hide) {
-            this.hide = hide;
-        }
-        if (show) {
-            this.show = show;
-        }
-    }
-    get rtc() {
-        if (!this._rtc) {
-            throw new Error("RTC not set");
-        }
-        return this._rtc;
-    }
-    set rtc(rtc) {
-        this._rtc = rtc;
-        rtc.on('callconnected', this.accept);
-        rtc.on('calldisconnected', this.endCall);
-    }
-    get name() {
-        return this.rtc.name;
-    }
-    call(peerName, promise='end') {
-        this.pendingNames.push(peerName);
-        let {start, end} = this.rtc.callUser(peerName);
-        end = end.then((() => {
-            this.close(peerName);
-        }).bind(this));
-        if (promise === 'end') {
-            return end;
-        }
-        return start;
-    }
-    endCall(peerName = 'all') {
-        if (peerName === 'all') {
-            for (let name of Object.keys(this.remoteStreams)) {
-                this.endCall(name);
-            }
-        }
-        if (this.remoteStreams[peerName]){
-            this.rtc.endCallWithUser(peerName);
-        }
-        this.closeCall(peerName);
-    }
-
-    accept(name, streams) {
-        if (streams instanceof Promise) {
-            streams.then(streams => this.accept(name, streams));
-            return;
-        }
-        if (this.pendingNames.includes(name)) {
-            this.pendingNames = this.pendingNames.filter(n => n !== name);
-        }
-
-        if (!this.localStream) {
-            this.localStream = streams.localStream;
-            this.setLocalSrc(this.localStream);
-        }
-        this.setRemoteSrc(streams.remoteStream, name);
-        this.remoteStreams[name] = streams.remoteStream;
-        this.setStreamCount(Object.keys(this.remoteStreams).length);
-    }
-    closeCall(peerName) {
-        this.pendingNames = this.pendingNames.filter(name => name !== peerName);
-        this.setRemoteSrc(null, peerName);
-        let rs = this.remoteStreams[peerName];
-        if (rs){
-            try {
-                rs.getTracks().forEach(track => track.stop());
-            }catch{}
-            delete this.remoteStreams[peerName];
-            this.setStreamCount(Object.keys(this.remoteStreams).length);
-        }
-    }
-    setStreamCount(count) {
-        if (!count) {
-            if (this.localStream) {
-                try{
-                    this.localStream.getTracks().forEach(track => track.stop());
-                }catch{}
-                this.setLocalSrc(null);
-                this.localStream = null;
-            }
-            this.setLocalSrc(null);
-            this.localStream = null;
-            this.hide();
-        }else{
-            this.show();
-        }
-    }
-    hide() {
-
-    }
-    show() {
-
-    }
-    close() {
-        // end the streams
-        this.endCall();
-    }
-}
+import { RTCVideoChat } from '../core/rtc-video-chat.js';
 
 
 class BasicVideoChat extends HTMLElement {
@@ -289,4 +152,4 @@ class BasicVideoChat extends HTMLElement {
 
 customElements.define('video-chat', BasicVideoChat);
 
-export { BasicVideoChat, RTCVideoChat };
+export { BasicVideoChat };

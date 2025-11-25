@@ -144,7 +144,10 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         this.addQuestionHandler('identify', this._returnPublicKey.bind(this));
         this.addQuestionHandler('challenge', this._sign.bind(this));
         this.on('connectedtopeer', (peerName)=>{
-            setTimeout(()=> {this.trustOrChallenge.bind(this)(peerName)}, 1000);
+            // Only validate if not already validated to prevent infinite loops
+            if (!this.validatedPeers.includes(peerName)) {
+                setTimeout(()=> {this.trustOrChallenge.bind(this)(peerName)}, 1000);
+            }
         });
 
         if (load) {
@@ -498,8 +501,11 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
                         }
                     }
                     this.keys.savePublicKeyString(peerName, publicKeyString);
-                    this.onValidatedPeer(peerName, true);
-                    this.validatedPeers.push(peerName);
+                    // Only add to validatedPeers if not already there (prevent duplicates)
+                    if (!this.validatedPeers.includes(peerName)) {
+                        this.validatedPeers.push(peerName);
+                        this.onValidatedPeer(peerName, true);
+                    }
                     return true;
                 } else {
                     console.error("Signature invalid for " + peerName);
@@ -518,9 +524,12 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         return this.sendRTCQuestion("challenge", challengeString, peerName).then((signature) => {
             return this.keys.verify(publicKeyString, signature, challengeString).then((valid) => {
                 console.log("Signature valid for " + peerName, valid);
-                this.validatedPeers.push(peerName);
-                console.log("Validated peers", this.validatedPeers);
-                this.onValidatedPeer(peerName);
+                // Only add to validatedPeers if not already there (prevent duplicates)
+                if (!this.validatedPeers.includes(peerName)) {
+                    this.validatedPeers.push(peerName);
+                    console.log("Validated peers", this.validatedPeers);
+                    this.onValidatedPeer(peerName);
+                }
 
                 return valid;
             }, (err) => {
@@ -546,6 +555,8 @@ class SignedMQTTRTCClient extends MQTTRTCClient {
         }
         console.log("Peer " + peerName + " validated");
         this.emit('validation', peerName, trusting);
+        // Don't emit connectedtopeer here - it causes infinite loops
+        // ChatManager now listens to 'validation' events to add users after validation
     }
     onValidationFailed(peerName, message) {
         console.error("Peer " + peerName + " validation failed" + (message ? ": " + message : ""));

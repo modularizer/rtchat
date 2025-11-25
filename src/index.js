@@ -32,7 +32,7 @@ export { Keys } from './crypto/keys.js';
 
 // Re-export UI components
 export { ChatBox } from './ui/chat-box.js';
-export { BasicVideoChat, RTCVideoChat } from './ui/video-chat.js';
+export { BasicVideoChat } from './ui/video-chat.js';
 
 // Re-export vanilla adapter
 export { RTChat } from './adapters/vanilla/rtchat.js';
