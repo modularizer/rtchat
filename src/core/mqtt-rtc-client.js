@@ -514,7 +514,21 @@ class BaseMQTTRTCClient extends EventEmitter {
   endCallWithUser(user){
     console.log("Ending call with " + user);
     if (this.rtcConnections[user]){
-        this.rtcConnections[user].endCall();
+        try {
+            this.rtcConnections[user].endCall();
+            console.log("Sent endcall message to " + user + " via RTC data channel");
+        } catch (err) {
+            console.warn("Failed to send endcall via RTC channel, trying MQTT fallback:", err);
+            // Fallback: send via MQTT if RTC channel fails
+            try {
+                this.sendOverRTC("endcall", null, user);
+                console.log("Sent endcall message to " + user + " via MQTT fallback");
+            } catch (mqttErr) {
+                console.error("Failed to send endcall message to " + user + " via both RTC and MQTT:", mqttErr);
+            }
+        }
+    } else {
+        console.warn("No RTC connection found for " + user + ", cannot send endcall message");
     }
   }
   callFromUser(user, callInfo, initiatedCall, promises){
@@ -536,9 +550,10 @@ class BaseMQTTRTCClient extends EventEmitter {
     }
   }
   oncallended(user){
-    console.log("Call ended with " + user);
+    console.log("BaseMQTTRTCClient.oncallended: Call ended with " + user);
     // Emit the callended event so UI components can react
     this.emit('callended', user);
+    console.log("BaseMQTTRTCClient.oncallended: Emitted 'callended' event for " + user);
   }
   acceptCallFromUser(user, callInfo, promises){
      return Promise.resolve(true);
@@ -756,6 +771,7 @@ class RTCConnection {
     }
     registerDataChannel(dataChannel){
         dataChannel.onmessage = ((e) => {
+            console.log("RTCConnection.registerDataChannel: Received message on channel '" + dataChannel.label + "' from " + this.target, e.data);
             this.onmessage(e, dataChannel.label);
         }).bind(this);
         dataChannel.onerror = ((e) => {
@@ -763,6 +779,7 @@ class RTCConnection {
             this.ondatachannelerror(e, dataChannel.label);
         }).bind(this);
         dataChannel.onopen = ((e) => {
+            console.log("RTCConnection.registerDataChannel: Data channel '" + dataChannel.label + "' opened for " + this.target);
             this.dataChannelDeferredPromises[dataChannel.label].resolve(e);
         }).bind(this);
         this.dataChannels[dataChannel.label] = dataChannel;
@@ -959,20 +976,44 @@ class RTCConnection {
                 }
             }
         }else if (channel === "endcall"){
+            console.log("RTCConnection.onmessage: Received endcall message from " + this.target);
             this._closeCall();
         }else{
             this.mqttClient.onrtcmessage(channel, event.data, this.target);
         }
     }
     endCall(){
-        this.send("endcall", null);
+        console.log("RTCConnection.endCall: Sending endcall message to " + this.target);
+        try {
+            const sendResult = this.send("endcall", null);
+            // send() can return a Promise if channel is not ready
+            if (sendResult && typeof sendResult.then === 'function') {
+                sendResult
+                    .then(() => {
+                        console.log("RTCConnection.endCall: Successfully sent endcall message to " + this.target);
+                    })
+                    .catch((err) => {
+                        console.error("RTCConnection.endCall: Failed to send endcall message (async):", err);
+                    });
+            } else {
+                console.log("RTCConnection.endCall: Successfully sent endcall message to " + this.target);
+            }
+        } catch (err) {
+            console.error("RTCConnection.endCall: Failed to send endcall message (sync):", err);
+            // Still close the call even if send failed
+        }
         this._closeCall();
     }
     _closeCall(){
+        console.log("RTCConnection._closeCall: Closing call with " + this.target);
         if (this.streamConnection){
             this.streamConnection.close();
-            this.localStream.getTracks().forEach(track => track.stop());
-            this.remoteStream.getTracks().forEach(track => track.stop());
+            if (this.localStream){
+                this.localStream.getTracks().forEach(track => track.stop());
+            }
+            if (this.remoteStream){
+                this.remoteStream.getTracks().forEach(track => track.stop());
+            }
             this.remoteStream = null;
             this.localStream = null;
         }
@@ -987,7 +1028,12 @@ class RTCConnection {
         this.callEndPromise = new DeferredPromise();
         this.callPromises = {start: this.streamPromise.promise, end: this.callEndPromise.promise};
 
-        this.mqttClient.oncallended(this.target);
+        if (this.mqttClient && this.mqttClient.oncallended){
+            console.log("RTCConnection._closeCall: Calling mqttClient.oncallended for " + this.target);
+            this.mqttClient.oncallended(this.target);
+        } else {
+            console.warn("RTCConnection._closeCall: mqttClient.oncallended is not defined!");
+        }
     }
 
     onReceivedIceCandidate(data) {
@@ -1356,8 +1402,18 @@ class MQTTRTCClient extends PromisefulMQTTRTCClient {
             return super.on(rtcevent, handler);
         }else if (rtcevent === "callended"){
             // Special case: callended sets oncallended
-            this.oncallended = handler.bind(this);
-            // Also register as event listener
+            // Store the original oncallended method that emits the event
+            const originalOnCallEnded = this.oncallended;
+            // Create a wrapper that calls the original (to emit event)
+            // The handler will be called via the event listener registered below
+            this.oncallended = (user) => {
+                // Call the original method to emit the 'callended' event
+                // This will trigger all registered event listeners including the handler
+                if (originalOnCallEnded) {
+                    originalOnCallEnded.call(this, user);
+                }
+            };
+            // Register handler as event listener so it gets called when event is emitted
             return super.on(rtcevent, handler);
         }else if (rtcevent === "question"){
             // Question handlers are registered via addQuestionHandler

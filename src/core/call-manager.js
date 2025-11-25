@@ -106,7 +106,10 @@ class CallManager extends EventEmitter {
     if (this.rtcClient.on) {
       this.rtcClient.on('call', this._handleIncomingCall);
       this.rtcClient.on('callconnected', this._handleCallConnected);
-      this.rtcClient.on('callended', this._handleCallEnded);
+      this.rtcClient.on('callended', (user) => {
+        console.log("CallManager: Received 'callended' event from RTC client for " + user);
+        this._handleCallEnded(user);
+      });
       this.rtcClient.on('disconnectedfrompeer', (user) => {
         this._handleDisconnectedFromUser(user);
       });
@@ -241,7 +244,35 @@ class CallManager extends EventEmitter {
    * @private
    */
   _handleCallEnded(peerName) {
-    // Clear timeouts
+    console.log("CallManager._handleCallEnded: Called for " + peerName);
+    // Check if call is already ended (idempotent)
+    const currentState = this.callState.getUserState(peerName);
+    if (currentState && currentState.status === 'inactive') {
+      // Already ended, skip
+      console.log("CallManager._handleCallEnded: Call already ended for " + peerName + ", skipping");
+      return;
+    }
+    
+    // CRITICAL: Collect all users with active/pending calls BEFORE updating any state
+    // This ensures we get the complete list of all calls that need to be ended
+    const activeCallsBefore = this.callState.getActiveCalls();
+    const pendingCallsBefore = this.callState.getPendingCalls();
+    const allUsersToEnd = new Set([
+      ...activeCallsBefore.audio,
+      ...activeCallsBefore.video,
+      ...pendingCallsBefore,
+      ...this.outgoingCalls.keys()
+    ]);
+    
+    console.log("CallManager._handleCallEnded: Found calls to end:", {
+      activeAudio: Array.from(activeCallsBefore.audio),
+      activeVideo: Array.from(activeCallsBefore.video),
+      pending: Array.from(pendingCallsBefore),
+      outgoing: Array.from(this.outgoingCalls.keys()),
+      allUsersToEnd: Array.from(allUsersToEnd)
+    });
+    
+    // Clear timeouts for the primary peer
     const pendingCall = this.pendingCalls.get(peerName);
     if (pendingCall && pendingCall.timeoutId) {
       clearTimeout(pendingCall.timeoutId);
@@ -254,7 +285,7 @@ class CallManager extends EventEmitter {
     }
     this.outgoingCalls.delete(peerName);
     
-    // Update unified call state
+    // Update unified call state for the primary peer
     this.callState.setUserState(peerName, {
       status: 'inactive',
       audio: false,
@@ -264,16 +295,50 @@ class CallManager extends EventEmitter {
     this.localStreams.delete(peerName);
     this.latencyMetrics.delete(peerName);
     
-    // Stop stats polling if no active calls
-    const activeCalls = this.callState.getActiveCalls();
-    if (activeCalls.video.size === 0 && activeCalls.audio.size === 0) {
-      this._stopStatsPolling();
-      // Reset mute states
-      this.muteState = { mic: false, speakers: false, video: false };
+    // CRITICAL: Emit callended event for the primary call - this must always happen
+    this.emit('callended', { peerName });
+    
+    // End all other remaining calls (excluding the one we just ended)
+    for (const otherUser of allUsersToEnd) {
+      if (otherUser !== peerName) {
+        // End call with RTC client to send message
+        if (this.rtcClient && this.rtcClient.endCallWithUser) {
+          try {
+            this.rtcClient.endCallWithUser(otherUser);
+          } catch (err) {
+            console.warn(`Error ending call with ${otherUser}:`, err);
+          }
+        }
+        
+        // Update state for other user
+        const otherPendingCall = this.pendingCalls.get(otherUser);
+        if (otherPendingCall && otherPendingCall.timeoutId) {
+          clearTimeout(otherPendingCall.timeoutId);
+        }
+        this.pendingCalls.delete(otherUser);
+        
+        const otherOutgoingCall = this.outgoingCalls.get(otherUser);
+        if (otherOutgoingCall && otherOutgoingCall.timeoutId) {
+          clearTimeout(otherOutgoingCall.timeoutId);
+        }
+        this.outgoingCalls.delete(otherUser);
+        
+        this.callState.setUserState(otherUser, {
+          status: 'inactive',
+          audio: false,
+          video: false
+        });
+        this.localStreams.delete(otherUser);
+        this.latencyMetrics.delete(otherUser);
+        
+        // CRITICAL: Emit callended event for each other user
+        this.emit('callended', { peerName: otherUser });
+      }
     }
     
-    // Emit event
-    this.emit('callended', { peerName });
+    // Stop stats polling and reset mute states (all calls are now ended)
+    this._stopStatsPolling();
+    this.muteState = { mic: false, speakers: false, video: false };
   }
 
   /**
@@ -283,11 +348,12 @@ class CallManager extends EventEmitter {
    * @private
    */
   _handleCallTimeout(peerName, direction) {
-    // Clear pending/outgoing call
-    this.pendingCalls.delete(peerName);
-    this.outgoingCalls.delete(peerName);
+    // Stop ringing if ringer is provided
+    if (this.ringer && typeof this.ringer.stop === 'function') {
+      this.ringer.stop();
+    }
     
-    // End call with RTC client
+    // End call with RTC client to send message
     if (this.rtcClient && this.rtcClient.endCallWithUser) {
       try {
         this.rtcClient.endCallWithUser(peerName);
@@ -296,22 +362,10 @@ class CallManager extends EventEmitter {
       }
     }
     
-    // Update unified call state
-    this.callState.setUserState(peerName, {
-      status: 'inactive',
-      audio: false,
-      video: false
-    });
+    // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
+    this._handleCallEnded(peerName);
     
-    this.localStreams.delete(peerName);
-    this.latencyMetrics.delete(peerName);
-    
-    // Stop ringing if ringer is provided
-    if (this.ringer && typeof this.ringer.stop === 'function') {
-      this.ringer.stop();
-    }
-    
-    // Emit event
+    // Emit timeout event for UI notifications
     this.emit('calltimeout', { peerName, direction });
     
     // Use callUI if provided
@@ -429,8 +483,12 @@ class CallManager extends EventEmitter {
       
       // Check if call was rejected
       if (err === "Call rejected" || err?.message === "Call rejected") {
+        // CRITICAL: When call is rejected, end ALL calls and emit events
+        this._handleCallEnded(user);
         this.emit('callrejected', { user });
       } else {
+        // For other errors, also end all calls to ensure clean state
+        this._handleCallEnded(user);
         this.emit('callerror', { user, error: err });
       }
       
@@ -443,6 +501,8 @@ class CallManager extends EventEmitter {
    * @param {string} user - Name of the user
    */
   endCall(user) {
+    // First, tell RTC client to end the call and send "endcall" message to peer
+    // This must happen while the call is still active so the message can be sent
     if (this.rtcClient && this.rtcClient.endCallWithUser) {
       try {
         this.rtcClient.endCallWithUser(user);
@@ -451,7 +511,9 @@ class CallManager extends EventEmitter {
       }
     }
     
-    // Cleanup will happen via callended event
+    // CRITICAL: Use _handleCallEnded which will end ALL calls and emit events
+    // This ensures when any call ends, all other calls are also ended
+    this._handleCallEnded(user);
   }
 
   /**

@@ -64,9 +64,10 @@ class CallManagement {
         <div id="call-info-container"></div>
         <div id="call-controls-container">
           <span style="font-weight: bold; margin-right: 8px;">Call Controls:</span>
-          <button id="call-mute-mic-btn" class="call-control-button" title="Mute/Unmute microphone">Mute Mic</button>
-          <button id="call-mute-speakers-btn" class="call-control-button" title="Mute/Unmute speakers">Mute Speakers</button>
-          <button id="call-video-toggle-btn" class="call-control-button" title="Hide/Show video" style="display: none;">Hide Video</button>
+          <button id="call-mute-mic-btn" class="call-control-button" title="Toggle microphone on/off">Mic</button>
+          <button id="call-mute-speakers-btn" class="call-control-button" title="Toggle speakers on/off">Speakers</button>
+          <button id="call-video-toggle-btn" class="call-control-button" title="Toggle camera on/off">Camera</button>
+          <button id="end-call-button" class="call-control-button end-call" title="End call" style="background-color: #f44336; color: white;">End</button>
           <span id="call-metrics"></span>
         </div>
       `;
@@ -77,17 +78,83 @@ class CallManagement {
         infoContainer.id = 'call-info-container';
         existingButtonsContainer.after(infoContainer);
       }
+      
+      // Check if end call button exists in call-buttons-container and needs to be moved
+      const existingEndCallButton = existingButtonsContainer.querySelector('#end-call-button');
+      
       if (!this.container.querySelector('#call-controls-container')) {
         const controlsContainer = document.createElement('div');
         controlsContainer.id = 'call-controls-container';
         controlsContainer.innerHTML = `
           <span style="font-weight: bold; margin-right: 8px;">Call Controls:</span>
-          <button id="call-mute-mic-btn" class="call-control-button" title="Mute/Unmute microphone">Mute Mic</button>
-          <button id="call-mute-speakers-btn" class="call-control-button" title="Mute/Unmute speakers">Mute Speakers</button>
-          <button id="call-video-toggle-btn" class="call-control-button" title="Hide/Show video" style="display: none;">Hide Video</button>
+          <button id="call-mute-mic-btn" class="call-control-button" title="Toggle microphone on/off">Mic</button>
+          <button id="call-mute-speakers-btn" class="call-control-button" title="Toggle speakers on/off">Speakers</button>
+          <button id="call-video-toggle-btn" class="call-control-button" title="Toggle camera on/off">Camera</button>
           <span id="call-metrics"></span>
         `;
         this.container.appendChild(controlsContainer);
+        
+        // Move existing end call button to call-controls-container if it exists
+        if (existingEndCallButton) {
+          // Update the button styling and class
+          existingEndCallButton.className = 'call-control-button end-call';
+          existingEndCallButton.style.backgroundColor = '#f44336';
+          existingEndCallButton.style.color = 'white';
+          // Move it to call-controls-container (before metrics span)
+          const metricsSpan = controlsContainer.querySelector('#call-metrics');
+          if (metricsSpan) {
+            controlsContainer.insertBefore(existingEndCallButton, metricsSpan);
+          } else {
+            controlsContainer.appendChild(existingEndCallButton);
+          }
+        } else {
+          // Create new end call button if it doesn't exist
+          const endCallBtn = document.createElement('button');
+          endCallBtn.id = 'end-call-button';
+          endCallBtn.className = 'call-control-button end-call';
+          endCallBtn.title = 'End call';
+          endCallBtn.textContent = 'End';
+          endCallBtn.style.backgroundColor = '#f44336';
+          endCallBtn.style.color = 'white';
+          const metricsSpan = controlsContainer.querySelector('#call-metrics');
+          if (metricsSpan) {
+            controlsContainer.insertBefore(endCallBtn, metricsSpan);
+          } else {
+            controlsContainer.appendChild(endCallBtn);
+          }
+        }
+      } else {
+        // call-controls-container already exists, but we still need to move the end call button
+        const controlsContainer = this.container.querySelector('#call-controls-container');
+        const existingEndCallInControls = controlsContainer.querySelector('#end-call-button');
+        
+        if (existingEndCallButton && !existingEndCallInControls) {
+          // Move end call button from call-buttons-container to call-controls-container
+          existingEndCallButton.className = 'call-control-button end-call';
+          existingEndCallButton.style.backgroundColor = '#f44336';
+          existingEndCallButton.style.color = 'white';
+          const metricsSpan = controlsContainer.querySelector('#call-metrics');
+          if (metricsSpan) {
+            controlsContainer.insertBefore(existingEndCallButton, metricsSpan);
+          } else {
+            controlsContainer.appendChild(existingEndCallButton);
+          }
+        } else if (!existingEndCallButton && !existingEndCallInControls) {
+          // Create new end call button if neither exists
+          const endCallBtn = document.createElement('button');
+          endCallBtn.id = 'end-call-button';
+          endCallBtn.className = 'call-control-button end-call';
+          endCallBtn.title = 'End call';
+          endCallBtn.textContent = 'End';
+          endCallBtn.style.backgroundColor = '#f44336';
+          endCallBtn.style.color = 'white';
+          const metricsSpan = controlsContainer.querySelector('#call-metrics');
+          if (metricsSpan) {
+            controlsContainer.insertBefore(endCallBtn, metricsSpan);
+          } else {
+            controlsContainer.appendChild(endCallBtn);
+          }
+        }
       }
     }
     
@@ -96,10 +163,44 @@ class CallManagement {
     this.muteMicBtn = this.container.querySelector('#call-mute-mic-btn');
     this.muteSpeakersBtn = this.container.querySelector('#call-mute-speakers-btn');
     this.videoToggleBtn = this.container.querySelector('#call-video-toggle-btn');
+    this.endCallButton = this.container.querySelector('#end-call-button');
     this.metricsSpan = this.container.querySelector('#call-metrics');
     
     this.callInfoItems = new Map(); // Map<user, HTMLElement>
     this.incomingCallPrompts = new Map(); // Map<user, {element: HTMLElement, resolve: Function}>
+    
+    // Ensure end call button is in the correct location (call-controls-container, not call-buttons-container)
+    this._ensureEndCallButtonInCorrectLocation();
+  }
+  
+  /**
+   * Ensure the end call button is in call-controls-container, not call-buttons-container
+   * @private
+   */
+  _ensureEndCallButtonInCorrectLocation() {
+    const buttonsContainer = this.container.querySelector('#call-buttons-container');
+    const controlsContainer = this.container.querySelector('#call-controls-container');
+    const endCallButton = this.container.querySelector('#end-call-button');
+    
+    if (!endCallButton || !controlsContainer) {
+      return;
+    }
+    
+    // If end call button is in call-buttons-container, move it to call-controls-container
+    if (buttonsContainer && buttonsContainer.contains(endCallButton)) {
+      endCallButton.className = 'call-control-button end-call';
+      endCallButton.style.backgroundColor = '#f44336';
+      endCallButton.style.color = 'white';
+      const metricsSpan = controlsContainer.querySelector('#call-metrics');
+      if (metricsSpan) {
+        controlsContainer.insertBefore(endCallButton, metricsSpan);
+      } else {
+        controlsContainer.appendChild(endCallButton);
+      }
+    }
+    
+    // Update reference
+    this.endCallButton = endCallButton;
   }
 
   /**
@@ -125,6 +226,17 @@ class CallManagement {
       this.videoToggleBtn.addEventListener('click', () => {
         const currentState = this.callManager.getMuteState();
         this.callManager.setVideoHidden(!currentState.video);
+      });
+    }
+    
+    // End call button handler
+    if (this.endCallButton) {
+      this.endCallButton.addEventListener('click', () => {
+        console.log('End call button clicked from CallManagement');
+        // End all active calls
+        if (this.callManager && typeof this.callManager.endAllCalls === 'function') {
+          this.callManager.endAllCalls();
+        }
       });
     }
   }
@@ -161,32 +273,122 @@ class CallManagement {
   _updateFromCallManager() {
     const activeCalls = this.callManager.getActiveCalls();
     const pendingCalls = this.callManager.getPendingCalls();
+    const hasActiveCalls = activeCalls.audio.size > 0 || activeCalls.video.size > 0;
+    const hasPendingCalls = pendingCalls.size > 0;
     
-    // Update visibility (handles all three states - this will hide/show containers correctly)
-    this._updateVisibility(activeCalls.audio, activeCalls.video);
-    
-    // Only show call info and controls if there are active calls (not pending)
-    if (activeCalls.audio.size > 0 || activeCalls.video.size > 0) {
-      this._updateCallInfo(activeCalls.audio, activeCalls.video);
-      this._updateButtonStates();
-      this._updateMetrics();
-    } else {
-      // No active calls - clear info and metrics
-      if (this.callInfoContainer) {
-        // Clear call info items but keep incoming call prompts
-        for (const [user, item] of this.callInfoItems.entries()) {
-          if (item && item.parentNode) {
-            item.parentNode.removeChild(item);
-          }
-        }
-        this.callInfoItems.clear();
-      }
-      if (this.metricsSpan) {
-        this.metricsSpan.textContent = '';
-      }
-      // Button states will be updated by _updateVisibility via _updateButtonStates
-      this._updateButtonStates();
+    // Determine current state and apply it
+    if (!hasActiveCalls && !hasPendingCalls) {
+      // State 1: No call (inactive)
+      this._setStateInactive();
+    } else if (hasPendingCalls && !hasActiveCalls) {
+      // State 2: Pending call
+      this._setStatePending();
+    } else if (hasActiveCalls) {
+      // State 3: Active call
+      this._setStateActive(activeCalls.audio, activeCalls.video);
     }
+  }
+
+  /**
+   * Set UI to State 1: No call (inactive)
+   * @private
+   */
+  _setStateInactive() {
+    // Set to inactive state - container remains in DOM, just not active
+    // Remove active class (CSS will handle hiding via #call-management.active rule)
+    this.container.classList.remove('active');
+    // Don't add 'hidden' class - let CSS handle visibility via .active class
+    this.container.style.display = '';
+    
+    // Hide all sub-containers (non-destructive - just hide, don't remove)
+    if (this.callControlsContainer) {
+      this.callControlsContainer.classList.remove('active');
+      this.callControlsContainer.style.display = 'none';
+    }
+    if (this.callInfoContainer) {
+      this.callInfoContainer.classList.remove('active');
+      this.callInfoContainer.style.display = 'none';
+    }
+    
+    // Clear call info items (these are dynamically created, so removing is OK)
+    for (const [user, item] of this.callInfoItems.entries()) {
+      if (item && item.parentNode) {
+        item.parentNode.removeChild(item);
+      }
+    }
+    this.callInfoItems.clear();
+    
+    // Clear metrics (non-destructive - just clear text)
+    if (this.metricsSpan) {
+      this.metricsSpan.textContent = '';
+    }
+    
+    // Reset button states (non-destructive)
+    this._updateButtonStates();
+    
+    // Container remains in DOM and ready to be shown again when .active class is added
+    // All sub-containers remain in DOM, just hidden
+  }
+
+  /**
+   * Set UI to State 2: Pending call
+   * @private
+   */
+  _setStatePending() {
+    // Show call-management container (for incoming call prompt)
+    this.container.classList.add('active');
+    this.container.classList.remove('hidden');
+    this.container.style.display = 'flex';
+    
+    // Hide controls and info (only prompt should be visible)
+    // Non-destructive - just hide, containers remain in DOM
+    if (this.callControlsContainer) {
+      this.callControlsContainer.classList.remove('active');
+      this.callControlsContainer.style.display = 'none';
+    }
+    if (this.callInfoContainer) {
+      this.callInfoContainer.classList.remove('active');
+      this.callInfoContainer.style.display = 'none';
+    }
+    
+    // Clear call info items (prompt is shown separately)
+    for (const [user, item] of this.callInfoItems.entries()) {
+      if (item && item.parentNode) {
+        item.parentNode.removeChild(item);
+      }
+    }
+    this.callInfoItems.clear();
+    
+    // Clear metrics
+    if (this.metricsSpan) {
+      this.metricsSpan.textContent = '';
+    }
+  }
+
+  /**
+   * Set UI to State 3: Active call
+   * @private
+   */
+  _setStateActive(audioCalls, videoCalls) {
+    // Show call-management container
+    this.container.classList.add('active');
+    this.container.classList.remove('hidden');
+    this.container.style.display = 'flex';
+    
+    // Show controls and info (non-destructive - ensure they're visible)
+    if (this.callControlsContainer) {
+      this.callControlsContainer.classList.add('active');
+      this.callControlsContainer.style.display = '';
+    }
+    if (this.callInfoContainer) {
+      this.callInfoContainer.classList.add('active');
+      this.callInfoContainer.style.display = '';
+    }
+    
+    // Update call info, button states, and metrics
+    this._updateCallInfo(audioCalls, videoCalls);
+    this._updateButtonStates();
+    this._updateMetrics();
   }
 
   /**
@@ -245,54 +447,6 @@ class CallManagement {
     this._updateMetrics();
   }
 
-  /**
-   * Update visibility of the call management section
-   * @private
-   */
-  _updateVisibility(audioCalls, videoCalls) {
-    const hasActiveCalls = audioCalls.size > 0 || videoCalls.size > 0;
-    const pendingCalls = this.callManager ? this.callManager.getPendingCalls() : new Set();
-    const hasPendingCalls = pendingCalls.size > 0;
-    
-    // State 1: No active calls and no pending calls - hide everything
-    if (!hasActiveCalls && !hasPendingCalls) {
-      this.container.classList.remove('active');
-      this.container.classList.add('hidden');
-      // Hide controls and info containers
-      if (this.callControlsContainer) {
-        this.callControlsContainer.classList.remove('active');
-      }
-      if (this.callInfoContainer) {
-        this.callInfoContainer.classList.remove('active');
-      }
-      return;
-    }
-    
-    // State 2 or 3: Show the container
-    this.container.classList.add('active');
-    this.container.classList.remove('hidden');
-    
-    // State 2: Pending call - show container but hide controls and info (prompt is shown separately)
-    if (hasPendingCalls && !hasActiveCalls) {
-      if (this.callControlsContainer) {
-        this.callControlsContainer.classList.remove('active');
-      }
-      if (this.callInfoContainer) {
-        this.callInfoContainer.classList.remove('active');
-      }
-      return;
-    }
-    
-    // State 3: Active call - show controls and info
-    if (hasActiveCalls) {
-      if (this.callControlsContainer) {
-        this.callControlsContainer.classList.add('active');
-      }
-      if (this.callInfoContainer) {
-        this.callInfoContainer.classList.add('active');
-      }
-    }
-  }
 
   /**
    * Show an incoming call prompt
@@ -306,17 +460,10 @@ class CallManagement {
     // Remove any existing prompt for this user
     this.hideIncomingCallPrompt(peerName);
     
-    // Ensure call-management container is visible for pending calls
+    // Ensure call-management container is visible
     if (this.container) {
-      this.container.classList.remove('hidden');
+      this.container.style.display = 'flex';
       this.container.classList.add('active');
-      // Hide controls and info containers (only show prompt)
-      if (this.callControlsContainer) {
-        this.callControlsContainer.classList.remove('active');
-      }
-      if (this.callInfoContainer) {
-        this.callInfoContainer.classList.remove('active');
-      }
     }
     
     // Get the call-buttons-container
@@ -347,11 +494,43 @@ class CallManagement {
     
     const callType = callInfo.video ? 'video' : 'audio';
     const callTypeIcon = callInfo.video ? '📹' : '🔊';
-    promptElement.innerHTML = `
-      <div style="font-weight: bold; font-size: 1.1em;">
-        ${callTypeIcon} Incoming ${callType} call from ${peerName}
-      </div>
-      <div style="display: flex; gap: 8px;">
+    const isVideoCall = callInfo.video === true;
+    
+    // For video calls, show three options: Answer as Video, Answer as Audio, Decline
+    // For audio calls, show two options: Accept, Reject
+    let buttonsHTML = '';
+    if (isVideoCall) {
+      buttonsHTML = `
+        <button class="accept-video-btn" style="
+          padding: 8px 16px;
+          background-color: white;
+          color: #4CAF50;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-weight: bold;
+        ">📹 Answer as Video</button>
+        <button class="accept-audio-btn" style="
+          padding: 8px 16px;
+          background-color: #2196F3;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-weight: bold;
+        ">🔊 Answer as Audio</button>
+        <button class="reject-call-btn" style="
+          padding: 8px 16px;
+          background-color: #f44336;
+          color: white;
+          border: none;
+          border-radius: 4px;
+          cursor: pointer;
+          font-weight: bold;
+        ">Decline</button>
+      `;
+    } else {
+      buttonsHTML = `
         <button class="accept-call-btn" style="
           padding: 8px 16px;
           background-color: white;
@@ -370,28 +549,98 @@ class CallManagement {
           cursor: pointer;
           font-weight: bold;
         ">Reject</button>
+      `;
+    }
+    
+    promptElement.innerHTML = `
+      <div style="font-weight: bold; font-size: 1.1em;">
+        ${callTypeIcon} Incoming ${callType} call from ${peerName}
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; justify-content: center;">
+        ${buttonsHTML}
       </div>
     `;
     
     // Create promise for accept/reject
+    // Promise can resolve to:
+    // - true: accept with original callInfo (for video calls, means accept as video)
+    // - {video: false, audio: true}: accept as audio only (for video calls)
+    // - false: reject
     let resolvePrompt;
     const promptPromise = new Promise((resolve) => {
       resolvePrompt = resolve;
     });
     
     // Set up button handlers
-    const acceptBtn = promptElement.querySelector('.accept-call-btn');
-    const rejectBtn = promptElement.querySelector('.reject-call-btn');
-    
-    acceptBtn.addEventListener('click', () => {
-      this.hideIncomingCallPrompt(peerName);
-      resolvePrompt(true);
-    });
-    
-    rejectBtn.addEventListener('click', () => {
-      this.hideIncomingCallPrompt(peerName);
-      resolvePrompt(false);
-    });
+    if (isVideoCall) {
+      // Video call: three buttons
+      const acceptVideoBtn = promptElement.querySelector('.accept-video-btn');
+      const acceptAudioBtn = promptElement.querySelector('.accept-audio-btn');
+      const rejectBtn = promptElement.querySelector('.reject-call-btn');
+      
+      acceptVideoBtn.addEventListener('click', () => {
+        this.hideIncomingCallPrompt(peerName);
+        // Return true to accept with original callInfo (video + audio)
+        resolvePrompt(true);
+      });
+      
+      acceptAudioBtn.addEventListener('click', () => {
+        this.hideIncomingCallPrompt(peerName);
+        // Return modified callInfo to accept as audio only
+        resolvePrompt({video: false, audio: true});
+      });
+      
+      rejectBtn.addEventListener('click', () => {
+        // Stop ringing immediately
+        if (this.callManager && this.callManager.ringer && typeof this.callManager.ringer.stop === 'function') {
+          this.callManager.ringer.stop();
+        }
+        
+        // Hide the prompt first
+        this.hideIncomingCallPrompt(peerName);
+        
+        // CRITICAL: End the call FIRST to send "endcall" message to caller
+        // This ensures the caller receives the message and their UI updates
+        if (this.callManager) {
+          this.callManager.endCall(peerName);
+        }
+        
+        // Then resolve promise to false to indicate rejection
+        // This will cause RTC client to reject the call (which also sends "endcall" via catch handler)
+        // But we've already sent it above, so this is just for cleanup
+        resolvePrompt(false);
+      });
+    } else {
+      // Audio call: two buttons (same as before)
+      const acceptBtn = promptElement.querySelector('.accept-call-btn');
+      const rejectBtn = promptElement.querySelector('.reject-call-btn');
+      
+      acceptBtn.addEventListener('click', () => {
+        this.hideIncomingCallPrompt(peerName);
+        resolvePrompt(true);
+      });
+      
+      rejectBtn.addEventListener('click', () => {
+        // Stop ringing immediately
+        if (this.callManager && this.callManager.ringer && typeof this.callManager.ringer.stop === 'function') {
+          this.callManager.ringer.stop();
+        }
+        
+        // Hide the prompt first
+        this.hideIncomingCallPrompt(peerName);
+        
+        // CRITICAL: End the call FIRST to send "endcall" message to caller
+        // This ensures the caller receives the message and their UI updates
+        if (this.callManager) {
+          this.callManager.endCall(peerName);
+        }
+        
+        // Then resolve promise to false to indicate rejection
+        // This will cause RTC client to reject the call (which also sends "endcall" via catch handler)
+        // But we've already sent it above, so this is just for cleanup
+        resolvePrompt(false);
+      });
+    }
     
     // Store prompt
     this.incomingCallPrompts.set(peerName, {
@@ -567,22 +816,29 @@ class CallManagement {
     const hasVideoCalls = activeCalls.video.size > 0;
     
     if (this.muteMicBtn) {
-      this.muteMicBtn.textContent = muteState.mic ? 'Unmute Mic' : 'Mute Mic';
-      this.muteMicBtn.title = muteState.mic ? 'Unmute microphone' : 'Mute microphone';
+      // Toggle button: show "Mic" with active state and strikethrough when muted
+      this.muteMicBtn.textContent = 'Mic';
+      this.muteMicBtn.title = muteState.mic ? 'Microphone is muted - click to unmute' : 'Microphone is on - click to mute';
       this.muteMicBtn.classList.toggle('active', muteState.mic);
+      this.muteMicBtn.style.textDecoration = muteState.mic ? 'line-through' : 'none';
     }
     
     if (this.muteSpeakersBtn) {
-      this.muteSpeakersBtn.textContent = muteState.speakers ? 'Unmute Speakers' : 'Mute Speakers';
-      this.muteSpeakersBtn.title = muteState.speakers ? 'Unmute speakers' : 'Mute speakers';
+      // Toggle button: show "Speakers" with active state and strikethrough when muted
+      this.muteSpeakersBtn.textContent = 'Speakers';
+      this.muteSpeakersBtn.title = muteState.speakers ? 'Speakers are muted - click to unmute' : 'Speakers are on - click to mute';
       this.muteSpeakersBtn.classList.toggle('active', muteState.speakers);
+      this.muteSpeakersBtn.style.textDecoration = muteState.speakers ? 'line-through' : 'none';
     }
     
     if (this.videoToggleBtn) {
+      // Show camera button only for video calls
       this.videoToggleBtn.style.display = hasVideoCalls ? 'inline-block' : 'none';
-      this.videoToggleBtn.textContent = muteState.video ? 'Show Video' : 'Hide Video';
-      this.videoToggleBtn.title = muteState.video ? 'Show video' : 'Hide video';
+      // Toggle button: show "Camera" with active state and strikethrough when hidden
+      this.videoToggleBtn.textContent = 'Camera';
+      this.videoToggleBtn.title = muteState.video ? 'Camera is hidden - click to show' : 'Camera is on - click to hide';
       this.videoToggleBtn.classList.toggle('active', muteState.video);
+      this.videoToggleBtn.style.textDecoration = muteState.video ? 'line-through' : 'none';
     }
   }
 

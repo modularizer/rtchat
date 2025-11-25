@@ -111,14 +111,14 @@ class ChatBox extends HTMLElement {
           <div id="call-buttons-container">
             <button id="audio-call-button" class="call-button audio-call" title="Start audio call">Audio</button>
             <button id="video-call-button" class="call-button video-call" title="Start video call">Video</button>
-            <button id="end-call-button" class="call-button end-call" title="End call">End</button>
           </div>
           <div id="call-info-container"></div>
           <div id="call-controls-container">
             <span id="call-controls-label">Call Controls:</span>
-            <button id="call-mute-mic-btn" class="call-control-button" title="Mute/Unmute microphone">Mute Mic</button>
-            <button id="call-mute-speakers-btn" class="call-control-button" title="Mute/Unmute speakers">Mute Speakers</button>
-            <button id="call-video-toggle-btn" class="call-control-button hidden" title="Hide/Show video">Hide Video</button>
+            <button id="call-mute-mic-btn" class="call-control-button" title="Toggle microphone on/off">Mic</button>
+            <button id="call-mute-speakers-btn" class="call-control-button" title="Toggle speakers on/off">Speakers</button>
+            <button id="call-video-toggle-btn" class="call-control-button" title="Toggle camera on/off">Camera</button>
+            <button id="end-call-button" class="call-control-button end-call" title="End call" style="background-color: #f44336; color: white;">End</button>
             <span id="call-metrics"></span>
           </div>
         </div>
@@ -1079,17 +1079,16 @@ class ChatBox extends HTMLElement {
     }
     
     // Restore buttons container if it was cleared by incoming call prompt
+    // Note: end call button should always be in call-controls-container, not call-buttons-container
     if (buttonsContainer && buttonsContainer.children.length === 0) {
-      // Recreate the buttons
+      // Recreate the buttons (but NOT the end call button - it belongs in call-controls-container)
       if (this.audioCallButton && !buttonsContainer.contains(this.audioCallButton)) {
         buttonsContainer.appendChild(this.audioCallButton);
       }
       if (this.videoCallButton && !buttonsContainer.contains(this.videoCallButton)) {
         buttonsContainer.appendChild(this.videoCallButton);
       }
-      if (this.endCallButton && !buttonsContainer.contains(this.endCallButton)) {
-        buttonsContainer.appendChild(this.endCallButton);
-      }
+      // End call button should NOT be added here - it belongs in call-controls-container
     }
     
     // Hide all buttons first
@@ -1200,9 +1199,35 @@ class ChatBox extends HTMLElement {
     // Delegate to CallManager
     this.callManager.endAllCalls();
     
-    // UI cleanup will happen via callended events
+    // Immediately update UI state (don't wait for events)
+    // Get current state after ending calls
+    const activeCalls = this.callManager.getActiveCalls();
+    const hasActiveCalls = activeCalls.video.size > 0 || activeCalls.audio.size > 0;
+    
+    // Reset call type
     this.activeCallType = null;
-    this._updateCallButtonStates(false);
+    
+    // Update button states
+    this._updateCallButtonStates(hasActiveCalls);
+    this._updateCallButtonVisibility();
+    
+    // Hide video container if no active calls
+    if (!hasActiveCalls) {
+      if (this.chatVideo) {
+        this.chatVideo.classList.remove('visible');
+      }
+      if (this.videoDisplay && this.videoDisplay.container) {
+        this.videoDisplay.hide();
+      }
+    }
+    
+    // Update CallManagement UI state immediately
+    if (this.callManagement && typeof this.callManagement._updateFromCallManager === 'function') {
+      this.callManagement._updateFromCallManager();
+    }
+    
+    // Also update call controls visibility
+    this._updateCallControlsVisibility();
   }
 
   /**
@@ -1243,17 +1268,16 @@ class ChatBox extends HTMLElement {
     }
     
     // Restore buttons container if it was cleared by incoming call prompt
+    // Note: end call button should always be in call-controls-container, not call-buttons-container
     if (buttonsContainer && buttonsContainer.children.length === 0) {
-      // Recreate the buttons
+      // Recreate the buttons (but NOT the end call button - it belongs in call-controls-container)
       if (this.audioCallButton && !buttonsContainer.contains(this.audioCallButton)) {
         buttonsContainer.appendChild(this.audioCallButton);
       }
       if (this.videoCallButton && !buttonsContainer.contains(this.videoCallButton)) {
         buttonsContainer.appendChild(this.videoCallButton);
       }
-      if (this.endCallButton && !buttonsContainer.contains(this.endCallButton)) {
-        buttonsContainer.appendChild(this.endCallButton);
-      }
+      // End call button should NOT be added here - it belongs in call-controls-container
     }
     
     if (isActive && callType) {
@@ -1602,6 +1626,35 @@ class ChatBox extends HTMLElement {
     
     this.callManager.on('mutechanged', () => {
       // CallManagement handles this automatically
+    });
+    
+    // Listen to speakers mute changes to actually mute/unmute audio elements
+    this.callManager.on('speakersmutechanged', ({muted}) => {
+      this.isSpeakersMuted = muted;
+      
+      // Mute/unmute all remote audio elements (speakers)
+      if (this.audioDisplay && this.audioDisplay.activeStreams) {
+        for (const [peerName, streamData] of Object.entries(this.audioDisplay.activeStreams)) {
+          if (streamData && streamData.container) {
+            const remoteAudio = streamData.container.querySelector('.audio-stream-element[data-type="remote"]');
+            if (remoteAudio) {
+              remoteAudio.muted = muted;
+            }
+          }
+        }
+      }
+      
+      // Also handle video calls which may have audio
+      if (this.videoDisplay && this.videoDisplay.activeStreams) {
+        for (const [peerName, streamData] of Object.entries(this.videoDisplay.activeStreams)) {
+          if (streamData && streamData.container) {
+            const remoteVideo = streamData.container.querySelector('.video-stream-remote');
+            if (remoteVideo) {
+              remoteVideo.muted = muted;
+            }
+          }
+        }
+      }
     });
   }
   
@@ -1959,6 +2012,8 @@ class ChatBox extends HTMLElement {
    * @private
    */
   _handleCallEnded(peerName) {
+    console.log("ChatBox._handleCallEnded: Handling call ended for " + peerName);
+    
     // Stop ringing if call ends (including cancelled calls)
     if (this.ringer && typeof this.ringer.stop === 'function') {
       this.ringer.stop();
@@ -1970,11 +2025,21 @@ class ChatBox extends HTMLElement {
     
     // Get current state from CallManager (state is already updated when event fires)
     const activeCalls = this.callManager ? this.callManager.getActiveCalls() : {audio: new Set(), video: new Set()};
+    const pendingCalls = this.callManager ? this.callManager.getPendingCalls() : new Set();
     const hasActiveCalls = activeCalls.video.size > 0 || activeCalls.audio.size > 0;
+    const hasPendingCalls = pendingCalls.size > 0;
+    
+    console.log("ChatBox._handleCallEnded: State after call ended - active:", activeCalls, "pending:", pendingCalls);
     
     // Hide video container if no active video calls
-    if (activeCalls.video.size === 0 && this.chatVideo) {
-      this.chatVideo.classList.remove('visible');
+    if (activeCalls.video.size === 0) {
+      if (this.chatVideo) {
+        this.chatVideo.classList.remove('visible');
+      }
+      // Also hide the video display container directly
+      if (this.videoDisplay && this.videoDisplay.container) {
+        this.videoDisplay.hide();
+      }
     }
     
     // Update pinned audio call message
@@ -1989,12 +2054,22 @@ class ChatBox extends HTMLElement {
     // Update button states based on actual call state (will show start buttons if no active calls)
     this._updateCallButtonStates(hasActiveCalls);
     
-    // Update button visibility to restore start call buttons if no active calls
+    // Update button visibility to restore start call buttons if no active calls AND no pending calls
     this._updateCallButtonVisibility();
     
-    // Update CallManagement UI - this should hide controls and info containers
+    // CRITICAL: Update CallManagement UI - this should hide controls and info containers
+    // Always update state from CallManager to ensure UI is in correct state
     if (this.callManagement && typeof this.callManagement._updateFromCallManager === 'function') {
+      console.log("ChatBox._handleCallEnded: Updating CallManagement UI");
       this.callManagement._updateFromCallManager();
+    }
+    
+    // Also ensure video container is hidden if no active calls
+    if (!hasActiveCalls && this.chatVideo) {
+      this.chatVideo.classList.remove('visible');
+      if (this.videoDisplay && this.videoDisplay.container) {
+        this.videoDisplay.hide();
+      }
     }
   }
   
@@ -2171,7 +2246,10 @@ class ChatBox extends HTMLElement {
    * @private
    */
   _updatePinnedAudioCallMessage() {
-    const hasAudioCalls = this.activeAudioCalls.size > 0;
+    // Get active calls from CallManager (not legacy activeAudioCalls property)
+    const activeCalls = this.callManager ? this.callManager.getActiveCalls() : {audio: new Set(), video: new Set()};
+    const audioCalls = activeCalls.audio || new Set();
+    const hasAudioCalls = audioCalls.size > 0;
     
     if (hasAudioCalls) {
       // Create or update pinned message
@@ -2190,8 +2268,8 @@ class ChatBox extends HTMLElement {
       }
       
       // Update message content with list of active audio calls
-      const callList = Array.from(this.activeAudioCalls).join(', ');
-      const callCount = this.activeAudioCalls.size;
+      const callList = Array.from(audioCalls).join(', ');
+      const callCount = audioCalls.size;
       this.pinnedAudioCallMessage.textContent = `🔊 Audio call active${callCount > 1 ? 's' : ''} with: ${callList}`;
       this.pinnedAudioCallMessage.classList.remove('hidden');
     } else {
